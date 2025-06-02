@@ -1,127 +1,242 @@
-from flask import Flask, Response, render_template_string, request, redirect, url_for
+import sys
+import os
 import cv2
 import time
-import threading
-import queue
+import numpy as np
 
-app = Flask(__name__)
+import time
 
-# 開啟預設攝影機（索引 0）
-camera = cv2.VideoCapture(0)
-latest_frame = None  # 儲存最新影格
-frame_lock = threading.Lock()  # 保護 latest_frame
+from match_template import cv_aoi
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QComboBox, QFileDialog, QHBoxLayout, QSpinBox
+)
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QTimer, pyqtSignal, QPoint
 
-def camera_reader(stop_event):
-    global latest_frame
-    while not stop_event.is_set():
-        success, frame = camera.read()
-        if success:
-            with frame_lock:
-                latest_frame = frame.copy()
-                try:
-                    frame_queue.put_nowait(frame.copy())
-                except queue.Full:
-                    pass
+class FolderComboBox(QComboBox):
+    def showPopup(self):
+        if hasattr(self, 'update_callback') and callable(self.update_callback):
+            self.update_callback()
+        super().showPopup()
+
+class AOILabel(QLabel):
+    aoi_point_signal = pyqtSignal(QPoint)
+    aoi_clear_signal = pyqtSignal()  # 新增右鍵清除訊號
+    def mousePressEvent(self, event):
+        if event.button() == 1:  # 左鍵
+            self.aoi_point_signal.emit(event.pos())
+        elif event.button() == 2:  # 右鍵
+            self.aoi_clear_signal.emit()
+        super().mousePressEvent(event)
+
+class CameraApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Camera Stream (Local UI)")
+        self.image_label = AOILabel()
+        self.capture_btn = QPushButton("📸 拍照")
+        self.folder_combo = FolderComboBox()
+        self.folder_combo.update_callback = self.update_folder_list
+        self.folder_combo.addItem("")  # 預設空白
+        self.set_sample_btn = QPushButton("設定檢測樣本")  # 新增按鈕
+        self.update_folder_list()
+
+        # 新增四個 SpinBox
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(0, 255)
+        self.threshold_spin.setValue(75)
+        self.threshold_spin.setPrefix("threshold: ")
+        self.erode_spin = QSpinBox()
+        self.erode_spin.setRange(0, 20)
+        self.erode_spin.setValue(2)
+        self.erode_spin.setPrefix("n_erode: ")
+        self.dilate_spin = QSpinBox()
+        self.dilate_spin.setRange(0, 20)
+        self.dilate_spin.setValue(2)
+        self.dilate_spin.setPrefix("n_dilate: ")
+        self.min_samples_spin = QSpinBox()
+        self.min_samples_spin.setRange(1, 100)
+        self.min_samples_spin.setValue(25)
+        self.min_samples_spin.setPrefix("min_samples: ")
+
+        self.capture_btn.clicked.connect(self.snapshot_image)
+        self.set_sample_btn.clicked.connect(self.set_sample)  # 綁定事件
+        self.image_label.aoi_point_signal.connect(self.handle_aoi_point)
+        self.image_label.aoi_clear_signal.connect(self.clear_aoi_rect)  # 綁定右鍵清除
+        self.aoi_points = []  # 用來記錄 AOI 兩點
+        self.aoi_rect = None  # AOI 區域
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.image_label)
+        hbox = QHBoxLayout()
+        hbox.addWidget(QLabel("選擇資料夾："))
+        hbox.addWidget(self.folder_combo)
+        hbox.addWidget(self.set_sample_btn)  # 加入新按鈕
+        layout.addLayout(hbox)
+        # 新增參數設定區
+        param_hbox = QHBoxLayout()
+        param_hbox.addWidget(self.threshold_spin)
+        param_hbox.addWidget(self.erode_spin)
+        param_hbox.addWidget(self.dilate_spin)
+        param_hbox.addWidget(self.min_samples_spin)
+        layout.addLayout(param_hbox)
+        layout.addWidget(self.capture_btn)
+        self.setLayout(layout)
+
+        self.video_width = 3840
+        self.video_height = 2160
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FPS, 5)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height)
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        self.cap.set(cv2.CAP_PROP_EXPOSURE, -5)
+        self.cap.set(cv2.CAP_PROP_AUTO_WB, -6)
+        self.cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000)
+        self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)
+
+        self.current_frame = None
+        self.aoi_model = cv_aoi()
+        self.goldens = []
+
+    def update_folder_list(self):
+        current = self.folder_combo.currentText()
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        folders = [
+            name for name in os.listdir(base_path)
+            if os.path.isdir(os.path.join(base_path, name))
+            and name not in ['.ipynb_checkpoints', 'templates','.git','__pycache__']
+        ]
+        self.folder_combo.blockSignals(True)
+        self.folder_combo.clear()
+        self.folder_combo.addItem("")  # 保留一個空白
+        for folder in folders:
+            self.folder_combo.addItem(folder)
+        # 恢復上次選擇
+        idx = self.folder_combo.findText(current)
+        if idx >= 0:
+            self.folder_combo.setCurrentIndex(idx)
         else:
-            time.sleep(0.05)  # 若失敗則稍等
+            self.folder_combo.setCurrentIndex(0)
+        self.folder_combo.blockSignals(False)
 
-def generate_frames():
-    while True:
-        with frame_lock:
-            frame = None if latest_frame is None else latest_frame.copy()
-        if frame is None:
-            time.sleep(0.05)
-            continue
-        # 只在這裡 encode
-        ret, buffer = cv2.imencode('.jpg', frame)
-        jpg_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + jpg_bytes + b'\r\n')
-        time.sleep(0.03)  # 控制 FPS
+    def handle_aoi_point(self, pos):
+        if self.aoi_rect is not None:
+            return
+        self.aoi_points.append((pos.x(), pos.y()))
+        if len(self.aoi_points) == 2:
+            x1, y1 =(np.array(self.aoi_points[0]).astype(float) / np.array([1280.0 / self.video_width, 720.0 / self.video_height])).astype(int)
+            x2, y2 =(np.array(self.aoi_points[1]).astype(float) / np.array([1280.0 / self.video_width, 720.0 / self.video_height])).astype(int)
+            # 計算 AOI 區域的矩形
+            self.aoi_rect = [min(y1, y2), max(y1, y2), min(x1, x2), max(x1, x2)]  # [top, bottom, left, right]
+            self.aoi_points = []
+            print(f"AOI 設定為: {self.aoi_rect}")
 
-@app.route('/')
-def index():
-    return render_template_string('''
-        <html>
-        <head>
-            <title>Camera Stream</title>
-        </head>
-        <body>
-            <h1>Live Camera Feed</h1>
-            <img src="/video_feed" width="1280" height="720"><br>
-            <form action="/capture" method="post">
-                <button type="submit">📸 拍照</button>
-            </form>
-        </body>
-        </html>
-    ''')
+    def update_frame(self):
+        ret, frame = self.cap.read()
+        if ret:
+            self.current_frame = frame
+            display_frame = frame.copy()
+            if self.aoi_rect:
+                # 在 AOI 區域畫紅框
+                t, b, l, r = self.aoi_rect
+                cv2.rectangle(display_frame, (l, t), (r, b), (0, 0, 255), 4)
+            #frame = cv2.imread('C:/Users/yuan/Desktop/factory/snapshot_20250529-161051.bmp')[150:2000,800:2800]
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+            if self.goldens:
+                #frame= frame[150:2000,800:2800]
+                if self.aoi_rect:
+                    aoi = self.aoi_rect
+                    frame = frame[aoi[0]:aoi[1], aoi[2]:aoi[3]]
+                else:
+                    aoi = None
+                mask, mask_mean, mask_min, a = self.aoi_model.match_template(frame, self.goldens , aoi = aoi )
+                
+                # 讀取 UI 參數
+                threshold = self.threshold_spin.value()
+                n_erode = self.erode_spin.value()
+                n_dilate = self.dilate_spin.value()
+                min_samples = self.min_samples_spin.value()
+                
+                m = self.aoi_model.post_proc(mask_min, threshold, n_erode, n_dilate)
+                res = (np.stack([np.maximum(m,a[:,:,0]), a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
 
-@app.route('/capture', methods=['POST'])
-def capture():
-    global latest_frame
-    with frame_lock:
-        frame = None if latest_frame is None else latest_frame.copy()
-    if frame is not None:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"snapshot_{timestamp}.jpg"
-        cv2.imwrite(filename, frame)
-    return redirect(url_for('index'))
+                circle_image , n = self.aoi_model.draw_circle(m, res, min_samples=min_samples)
+                    
+                print("draw circle", n , "clusters")
+                
+                #print("successfully matched template, circle_image shape:", circle_image.shape)
+                #print("circle_image.shape " , circle_image.shape)
+                #cv2.imwrite("test.bmp" , circle_image)
+                
 
-def defect_detection_worker(frame_queue, stop_event):
+                #rgb_image = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+                #rgb_image = cv2.cvtColor(circle_image, cv2.COLOR_BGR2RGB)
+                rgb_image = circle_image.copy()
+                h, w, ch = rgb_image.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage. Format_RGB888)
+                self.image_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
+                   1280, 720, aspectRatioMode=1
+                ))
+            else:
+                rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_image.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage. Format_RGB888)
+                self.image_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
+                    1280, 720, aspectRatioMode=1
+                ))
+            
+    def snapshot_image(self):
+        if self.current_frame is not None:
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            folder = self.folder_combo.currentText()
+            filename = f"snapshot_{timestamp}.bmp"
+            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+            if folder:
+                save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder, filename)
+            cv2.imwrite(save_path, self.current_frame)
 
-    #aoi_model = cv_aoi()
+    def set_sample(self):
+        self.goldens = []
+        folder = self.folder_combo.currentText()
+        if not folder:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
+            return
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        folder_path = os.path.join(base_path, folder)
+        if not os.path.isdir(folder_path):
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "設定檢測樣本", "資料夾不存在！")
+            return
+        # 只保留 bmp 檔案
+        files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.bmp')]
+        if not files:
+            msg = "該資料夾內沒有 bmp 檔案。"
+        else:
+            msg = "\n".join(files)
+        
+        for img_path in files:
+            golden_img = cv2.imread(img_path)
+            kp, des = self.aoi_model.get_keypoint(golden_img)
+            self.goldens.append([golden_img, kp, des])
 
-    # img1 = cv2.imread('unname_16.bmp')
-    # img1_GRAY = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    def clear_aoi_rect(self):
+        self.aoi_rect = None
+        print("AOI 已清除")
 
-    # golden_img = cv2.imread('unname_25.bmp')
+    def closeEvent(self, event):
+        self.cap.release()
+        event.accept()
 
-    # goldens = []
-    # for img in [golden_img, golden_img, golden_img, golden_img, golden_img]:
-    #     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    #     kp, des = aoi_model.get_keypoint(img)
-    #     goldens.append([img, kp, des])
-
-    # mask, M, a = aoi_model(img1_GRAY, goldens , threshold=25, n_erode=1, n_dilate=1, aoi=[500, 1700, 600, 3000] )
-
-
-    # res = (np.stack([np.maximum(mask,a),a*(mask==0),a*(mask==0)], axis=-1))
-
-    # # Display the results
-    # cv2.imshow('Mask', mask)
-
-    # cv2.imshow('res', res)
-    
-    # cv2.imshow('output', aoi_model.draw_circle(mask, res, min_samples=50))
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    while not stop_event.is_set():
-        try:
-            frame = frame_queue.get(timeout=0.1)
-            print("Processing frame for defect detection...")
-            # 在這裡做瑕疵檢測
-            # result = your_defect_detection_function(frame)
-            # 可以將結果存到某個地方或進行後續處理
-        except queue.Empty:
-            continue
-
-if __name__ == '__main__':
-    frame_queue = queue.Queue(maxsize=10)
-    stop_event = threading.Event()
-    # 啟動 camera reader thread
-    camera_thread = threading.Thread(target=camera_reader, args=(stop_event,))
-    camera_thread.start()
-    worker = threading.Thread(target=defect_detection_worker, args=(frame_queue, stop_event))
-    worker.start()
-
-    app.run(host='0.0.0.0', port=8889)
-
-    stop_event.set()
-    camera_thread.join()
-    worker.join()
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = CameraApp()
+    win.show()
+    sys.exit(app.exec_())
