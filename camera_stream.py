@@ -4,24 +4,53 @@ import cv2
 import time
 import numpy as np
 
-import time
-
 from match_template import cv_aoi
+from control_panel import ControlPanel
+
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QComboBox, QFileDialog, QHBoxLayout, QSpinBox
+    QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
 )
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QTimer, pyqtSignal, QPoint
-
-class FolderComboBox(QComboBox):
-    def showPopup(self):
-        if hasattr(self, 'update_callback') and callable(self.update_callback):
-            self.update_callback()
-        super().showPopup()
+from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt
 
 class AOILabel(QLabel):
     aoi_point_signal = pyqtSignal(QPoint)
     aoi_clear_signal = pyqtSignal()  # 新增右鍵清除訊號
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = None
+        self.setStyleSheet("background-color: black;")
+        self.setAlignment(Qt.AlignCenter)  # 修正：加上 Qt
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 label 填滿空間
+        self.label_width = self.width()   # 新增：儲存 label 寬度
+        self.label_height = self.height() # 新增：儲存 label 高度
+
+    def resizeEvent(self, event):
+        self.label_width = self.width()   # 更新 label 寬度
+        self.label_height = self.height() # 更新 label 高度
+        super().resizeEvent(event)
+
+    def setPixmap(self, pixmap):
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt5.QtWidgets import QStyle
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QPainter
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        if self._pixmap:
+            widget_w, widget_h = self.width(), self.height()
+            pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
+            scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
+            new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
+            x = (widget_w - new_w) // 2
+            y = (widget_h - new_h) // 2
+            scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            painter.drawPixmap(x, y, scaled_pixmap)
+        # 不要呼叫 super().paintEvent(event)，避免 QLabel 預設繪圖覆蓋
+
     def mousePressEvent(self, event):
         if event.button() == 1:  # 左鍵
             self.aoi_point_signal.emit(event.pos())
@@ -34,54 +63,20 @@ class CameraApp(QWidget):
         super().__init__()
         self.setWindowTitle("Camera Stream (Local UI)")
         self.image_label = AOILabel()
-        self.capture_btn = QPushButton("📸 拍照")
-        self.folder_combo = FolderComboBox()
-        self.folder_combo.update_callback = self.update_folder_list
-        self.folder_combo.addItem("")  # 預設空白
-        self.set_sample_btn = QPushButton("設定檢測樣本")  # 新增按鈕
-        self.update_folder_list()
-
-        # 新增四個 SpinBox
-        self.threshold_spin = QSpinBox()
-        self.threshold_spin.setRange(0, 255)
-        self.threshold_spin.setValue(75)
-        self.threshold_spin.setPrefix("threshold: ")
-        self.erode_spin = QSpinBox()
-        self.erode_spin.setRange(0, 20)
-        self.erode_spin.setValue(2)
-        self.erode_spin.setPrefix("n_erode: ")
-        self.dilate_spin = QSpinBox()
-        self.dilate_spin.setRange(0, 20)
-        self.dilate_spin.setValue(2)
-        self.dilate_spin.setPrefix("n_dilate: ")
-        self.min_samples_spin = QSpinBox()
-        self.min_samples_spin.setRange(1, 100)
-        self.min_samples_spin.setValue(25)
-        self.min_samples_spin.setPrefix("min_samples: ")
-
-        self.capture_btn.clicked.connect(self.snapshot_image)
-        self.set_sample_btn.clicked.connect(self.set_sample)  # 綁定事件
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 image_label 填滿
         self.image_label.aoi_point_signal.connect(self.handle_aoi_point)
-        self.image_label.aoi_clear_signal.connect(self.clear_aoi_rect)  # 綁定右鍵清除
+        self.image_label.aoi_clear_signal.connect(self.clear_aoi_rect)
         self.aoi_points = []  # 用來記錄 AOI 兩點
         self.aoi_rect = None  # AOI 區域
 
+        self.control_panel = ControlPanel(self)
+
+        # 只顯示 image_label 並全螢幕，控制面板可另外 show
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)  # 讓 layout 沒有邊框
         layout.addWidget(self.image_label)
-        hbox = QHBoxLayout()
-        hbox.addWidget(QLabel("選擇資料夾："))
-        hbox.addWidget(self.folder_combo)
-        hbox.addWidget(self.set_sample_btn)  # 加入新按鈕
-        layout.addLayout(hbox)
-        # 新增參數設定區
-        param_hbox = QHBoxLayout()
-        param_hbox.addWidget(self.threshold_spin)
-        param_hbox.addWidget(self.erode_spin)
-        param_hbox.addWidget(self.dilate_spin)
-        param_hbox.addWidget(self.min_samples_spin)
-        layout.addLayout(param_hbox)
-        layout.addWidget(self.capture_btn)
         self.setLayout(layout)
+        self.showFullScreen()
 
         self.video_width = 3840
         self.video_height = 2160
@@ -103,34 +98,13 @@ class CameraApp(QWidget):
         self.aoi_model = cv_aoi()
         self.goldens = []
 
-    def update_folder_list(self):
-        current = self.folder_combo.currentText()
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        folders = [
-            name for name in os.listdir(base_path)
-            if os.path.isdir(os.path.join(base_path, name))
-            and name not in ['.ipynb_checkpoints', 'templates','.git','__pycache__']
-        ]
-        self.folder_combo.blockSignals(True)
-        self.folder_combo.clear()
-        self.folder_combo.addItem("")  # 保留一個空白
-        for folder in folders:
-            self.folder_combo.addItem(folder)
-        # 恢復上次選擇
-        idx = self.folder_combo.findText(current)
-        if idx >= 0:
-            self.folder_combo.setCurrentIndex(idx)
-        else:
-            self.folder_combo.setCurrentIndex(0)
-        self.folder_combo.blockSignals(False)
-
     def handle_aoi_point(self, pos):
         if self.aoi_rect is not None:
             return
         self.aoi_points.append((pos.x(), pos.y()))
         if len(self.aoi_points) == 2:
-            x1, y1 =(np.array(self.aoi_points[0]).astype(float) / np.array([1280.0 / self.video_width, 720.0 / self.video_height])).astype(int)
-            x2, y2 =(np.array(self.aoi_points[1]).astype(float) / np.array([1280.0 / self.video_width, 720.0 / self.video_height])).astype(int)
+            x1, y1 =(np.array(self.aoi_points[0]).astype(float) / np.array([self.image_label.label_width / self.video_width, self.image_label.label_height / self.video_height])).astype(int)
+            x2, y2 =(np.array(self.aoi_points[1]).astype(float) / np.array([self.image_label.label_width / self.video_width, self.image_label.label_height / self.video_height])).astype(int)
             # 計算 AOI 區域的矩形
             self.aoi_rect = [min(y1, y2), max(y1, y2), min(x1, x2), max(x1, x2)]  # [top, bottom, left, right]
             self.aoi_points = []
@@ -157,10 +131,10 @@ class CameraApp(QWidget):
                 mask, mask_mean, mask_min, a = self.aoi_model.match_template(frame, self.goldens , aoi = aoi )
                 
                 # 讀取 UI 參數
-                threshold = self.threshold_spin.value()
-                n_erode = self.erode_spin.value()
-                n_dilate = self.dilate_spin.value()
-                min_samples = self.min_samples_spin.value()
+                threshold = self.control_panel.threshold_spin.value()
+                n_erode = self.control_panel.erode_spin.value()
+                n_dilate = self.control_panel.dilate_spin.value()
+                min_samples = self.control_panel.min_samples_spin.value()
                 
                 m = self.aoi_model.post_proc(mask_min, threshold, n_erode, n_dilate)
                 res = (np.stack([np.maximum(m,a[:,:,0]), a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
@@ -179,23 +153,19 @@ class CameraApp(QWidget):
                 rgb_image = circle_image.copy()
                 h, w, ch = rgb_image.shape
                 bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage. Format_RGB888)
-                self.image_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
-                   1280, 720, aspectRatioMode=1
-                ))
+                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.image_label.setPixmap(QPixmap.fromImage(qt_image))
             else:
                 rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage. Format_RGB888)
-                self.image_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
-                    1280, 720, aspectRatioMode=1
-                ))
+                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.image_label.setPixmap(QPixmap.fromImage(qt_image))
             
     def snapshot_image(self):
         if self.current_frame is not None:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            folder = self.folder_combo.currentText()
+            folder = self.control_panel.folder_combo.currentText()
             filename = f"snapshot_{timestamp}.bmp"
             save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
             if folder:
@@ -204,7 +174,7 @@ class CameraApp(QWidget):
 
     def set_sample(self):
         self.goldens = []
-        folder = self.folder_combo.currentText()
+        folder = self.control_panel.folder_combo.currentText()
         if not folder:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
@@ -235,8 +205,18 @@ class CameraApp(QWidget):
         self.cap.release()
         event.accept()
 
+    def keyPressEvent(self, event):
+        # 按下 Esc 關閉所有程式
+        if event.key() == 16777216:  # Qt.Key_Escape
+            self.control_panel.close()  # 新增：關閉 ControlPanel
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = CameraApp()
-    win.show()
+    panel = win.control_panel
+    win.showFullScreen()
+    panel.show()
     sys.exit(app.exec_())
