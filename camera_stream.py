@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
 )
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt
+from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt, QObject, QThread
 
 class AOILabel(QLabel):
     aoi_rect_changed = pyqtSignal(object)  # 新增 AOI 區域變更訊號
@@ -25,8 +25,8 @@ class AOILabel(QLabel):
         self.label_height = self.height() # 新增：儲存 label 高度
         self.aoi_points = []  # 移進 AOILabel
         self.aoi_rect = None  # 移進 AOILabel
-        self.video_width = 3840  # 預設值，CameraApp 會設置
-        self.video_height = 2160
+        self.video_width = 2560  # 預設值，CameraApp 會設置
+        self.video_height = 1440
 
     def resizeEvent(self, event):
         self.label_width = self.width()   # 更新 label 寬度
@@ -78,6 +78,22 @@ class AOILabel(QLabel):
         print("AOI 已清除")
         self.aoi_rect_changed.emit(self.aoi_rect)
 
+class AOIMatchWorker(QObject):
+    finished = pyqtSignal(object, object, object, object, float)
+    def __init__(self, aoi_model, frame, goldens, aoi):
+        super().__init__()
+        self.aoi_model = aoi_model
+        self.frame = frame
+        self.goldens = goldens
+        self.aoi = aoi
+    def run(self):
+        import time
+        start_time = time.time()
+        mask, mask_mean, mask_min, a = self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
+        end_time = time.time()        
+        print("frame = ", self.frame.shape , " time = ", end_time - start_time)
+        self.finished.emit(mask, mask_mean, mask_min, a, end_time - start_time)
+
 class CameraApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -86,6 +102,8 @@ class CameraApp(QWidget):
         self.video_width = 3840
         self.video_height = 2160
         self.cap = cv2.VideoCapture(0)
+        
+        #self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUY2'))
         self.cap.set(cv2.CAP_PROP_FPS, 5)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height)
@@ -115,9 +133,32 @@ class CameraApp(QWidget):
         self.aoi_model = cv_aoi()
         self.goldens = []
         self.aoi_rect = None  # 用於同步 AOI 狀態
+        self.matching = False  # 新增：避免重複啟動 worker
+        
+        self.match_thread = None
 
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
+
+    def handle_match_result(self, mask, mask_mean, mask_min, a, elapsed):
+        self.matching = False
+        try:
+            threshold = self.control_panel.threshold_spin.value()
+            n_erode = self.control_panel.erode_spin.value()
+            n_dilate = self.control_panel.dilate_spin.value()
+            min_samples = self.control_panel.min_samples_spin.value()
+            m = self.aoi_model.post_proc(mask_min, threshold, n_erode, n_dilate)
+            res = (np.stack([np.maximum(m,a[:,:,0]), a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
+            circle_image , n = self.aoi_model.draw_circle(m, res, min_samples=min_samples)
+            #print("draw circle", n , "clusters")
+            rgb_image = circle_image.copy()
+            h, w, ch = rgb_image.shape
+            bytes_per_line = ch * w
+        
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.image_label.setPixmap(QPixmap.fromImage(qt_image))
+        except:
+            print("handle_match_result crash")
 
     def update_frame(self):
         ret, frame = self.cap.read()
@@ -130,36 +171,40 @@ class CameraApp(QWidget):
             if self.goldens:
                 if self.aoi_rect:
                     aoi = self.aoi_rect
-                    frame = frame[aoi[0]:aoi[1], aoi[2]:aoi[3]]
+                    frame_aoi = frame[aoi[0]:aoi[1], aoi[2]:aoi[3]]
                 else:
                     aoi = None
-                mask, mask_mean, mask_min, a = self.aoi_model.match_template(frame, self.goldens , aoi = aoi )
-                
-                threshold = self.control_panel.threshold_spin.value()
-                n_erode = self.control_panel.erode_spin.value()
-                n_dilate = self.control_panel.dilate_spin.value()
-                min_samples = self.control_panel.min_samples_spin.value()
-                
-                m = self.aoi_model.post_proc(mask_min, threshold, n_erode, n_dilate)
-                res = (np.stack([np.maximum(m,a[:,:,0]), a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
-
-                circle_image , n = self.aoi_model.draw_circle(m, res, min_samples=min_samples)
-
-                print("draw circle", n , "clusters")
-
-                #print("successfully matched template, circle_image shape:", circle_image.shape)
-                #print("circle_image.shape " , circle_image.shape)
-                #cv2.imwrite("test.bmp" , circle_image)
-                
-
-                #rgb_image = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
-                #rgb_image = cv2.cvtColor(circle_image, cv2.COLOR_BGR2RGB)
-                rgb_image = circle_image.copy()
-
-                h, w, ch = rgb_image.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                self.image_label.setPixmap(QPixmap.fromImage(qt_image))
+                    frame_aoi = frame
+                # 修正：避免 thread 尚未結束時重複啟動
+                # if self.match_thread is None:
+                #     print("self.match_thread is None")
+                    
+                # if self.matching:
+                #     print("self.matching ")
+                    
+                # if self.match_thread.isRunning() :
+                #     print("self.match_thread.isRunning()")
+                    #return
+                try:
+                    if not self.matching and (self.match_thread is None or not self.match_thread.isRunning()):
+                        self.matching = True
+                        self.match_thread = QThread()
+                        self.worker = AOIMatchWorker(self.aoi_model, frame_aoi, self.goldens, aoi)
+                        self.worker.moveToThread(self.match_thread)
+                        self.match_thread.started.connect(self.worker.run)
+                        self.worker.finished.connect(self.handle_match_result)
+                        self.worker.finished.connect(self.worker.deleteLater)
+                        self.worker.finished.connect(self.match_thread.quit)
+                        self.match_thread.finished.connect(self.match_thread.deleteLater)
+                        self.match_thread.start()
+                except:
+                    print("self.matching crash")
+                # 若正在比對，顯示暫存畫面
+                # rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                # h, w, ch = rgb_image.shape
+                # bytes_per_line = ch * w
+                # qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                # self.image_label.setPixmap(QPixmap.fromImage(qt_image))
             else:
                 rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
@@ -203,6 +248,10 @@ class CameraApp(QWidget):
 
     def closeEvent(self, event):
         self.cap.release()
+        # 修正：確保 thread 已結束
+        if self.match_thread is not None and self.match_thread.isRunning():
+            self.match_thread.quit()
+            self.match_thread.wait()
         event.accept()
 
     def keyPressEvent(self, event):
