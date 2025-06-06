@@ -124,4 +124,4 @@ class cv_aoi:
                 y,x = np.round(np.mean(pp, 0))
                 res = cv2.circle(res, (int(x),int(y)), int((100*len(pp)/min_samples)**.6), (255, 0, 255), 2)
 
-        return res , len(n)-1
+        return res , len(n)

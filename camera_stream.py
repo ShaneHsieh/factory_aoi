@@ -102,19 +102,28 @@ class CameraApp(QWidget):
         super().__init__()
         self.setWindowTitle("Camera Stream (Local UI)")
 
-        self.video_width = 3840
-        self.video_height = 2160
-        self.cap = cv2.VideoCapture(0)
+        self.video_width = 2560
+        self.video_height = 1440
+        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         
-        #self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUY2'))
-        self.cap.set(cv2.CAP_PROP_FPS, 5)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height)
-        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-        self.cap.set(cv2.CAP_PROP_EXPOSURE, -5)
-        self.cap.set(cv2.CAP_PROP_AUTO_WB, -6)
-        self.cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000)
-        self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        if not self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUY2')):
+            print("Can not set YUY2")
+        if not self.cap.set(cv2.CAP_PROP_FPS, 5):
+            print("Can not set FPS to 5")
+        if not self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width):
+            print("Can not set frame width to", self.video_width)
+        if not self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height):
+            print("Can not set frame height to", self.video_height)
+        if not self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25):
+            print("Can not set auto exposure to 0.25")
+        if not self.cap.set(cv2.CAP_PROP_EXPOSURE, -5):
+            print("Can not set exposure to -5")
+        if not self.cap.set(cv2.CAP_PROP_AUTO_WB, 0):
+            print("Can not set auto white balance to 0")
+        if not self.cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000):
+            print("Can not set white balance blue U to 4000")
+        if not self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0):
+            print("Can not set autofocus to 0")
 
         self.image_label = AOILabel()
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 image_label 填滿
@@ -226,12 +235,15 @@ class CameraApp(QWidget):
             cv2.imwrite(save_path, self.current_frame)
 
     def set_sample(self):
-        self.goldens = []
         folder = self.control_panel.folder_combo.currentText()
         if not folder:
+            if self.goldens is not None:
+                self.goldens = []
+                return
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
             return
+        self.goldens = []
         base_path = os.path.dirname(os.path.abspath(__file__))
         folder_path = os.path.join(base_path, folder)
         if not os.path.isdir(folder_path):
