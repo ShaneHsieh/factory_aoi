@@ -50,11 +50,16 @@ class cv_aoi:
                 c = cv2.warpPerspective(c, np.eye(3), img1.shape[:2][::-1])
         
         if len(good)>MIN_MATCH_COUNT:
-            src_pts = np.float32([ kp2[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
-            dst_pts = np.float32([ kp1[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
+            try:
+                src_pts = np.float32([ kp2[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
+                dst_pts = np.float32([ kp1[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
 
-            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 4.0)
-            a = cv2.warpPerspective(img2, M, img1.shape[:2][::-1])
+                M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 4.0)
+                if M is None:
+                    print("M is None")
+                a = cv2.warpPerspective(img2, M, img1.shape[:2][::-1])
+            except:
+                a = c
         else:
             a = c
 
@@ -68,7 +73,7 @@ class cv_aoi:
         if diff_a.sum()<diff_c.sum():
             return diff_a
         else:
-            print('no transform')
+            #print('no transform')
             return diff_c
 
     def match_template(self,img1, goldens, aoi = None ):
@@ -90,7 +95,9 @@ class cv_aoi:
 
             del future_to_diff 
 
-        return diff[np.argmin(np.sum(diff, axis=(1,2)))], np.mean(diff, axis=0), np.min(diff, axis=0), img1
+        index = np.argmin(np.sum(diff, axis=(1,2)))
+
+        return diff[index], np.mean(diff, axis=0), np.min(diff, axis=0), img1 , index
 
     def post_proc(self,mask,  threshold = 25, n_erode = 1, n_dilate = 1):
         kernel = np.ones((3,3), np.uint8)
@@ -106,8 +113,7 @@ class cv_aoi:
 
         p = np.stack(np.where(mask)).T
         if len(p) > 10000:
-            print("No draw circle")
-            return res , 0
+            return res , -1
         
         clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(p)
         n,c = np.unique(clustering.labels_, return_counts=1)

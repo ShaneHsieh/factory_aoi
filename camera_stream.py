@@ -58,7 +58,10 @@ class AOILabel(QLabel):
         if event.button() == 1:  # 左鍵
             self.handle_aoi_point(event.pos())
         elif event.button() == 2:  # 右鍵
-            self.clear_aoi_rect()
+            if len(self.aoi_points) > 0:
+                self.aoi_points = []
+            elif self.aoi_rect is not None:
+                self.clear_aoi_rect()
         super().mousePressEvent(event)
 
     def handle_aoi_point(self, pos):
@@ -89,9 +92,9 @@ class AOIMatchWorker(QObject):
     def run(self):
         import time
         start_time = time.time()
-        mask, mask_mean, mask_min, a = self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
+        mask, mask_mean, mask_min, a , index= self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
         end_time = time.time()        
-        print("frame = ", self.frame.shape , " time = ", end_time - start_time)
+        print(f"frame = {self.frame.shape} time = {end_time - start_time}  , index = {index}")
         self.finished.emit(mask, mask_mean, mask_min, a, end_time - start_time)
 
 class CameraApp(QWidget):
@@ -119,9 +122,13 @@ class CameraApp(QWidget):
         self.image_label.video_height = self.video_height
         self.image_label.aoi_rect_changed.connect(self.on_aoi_rect_changed)
         self.control_panel = ControlPanel(self)
+        self.n_label = QLabel("")  # 新增：顯示圈數
+        self.n_label.setStyleSheet("color: yellow; font-size: 32px; font-weight: bold; background: rgba(0,0,0,0.5);")
+        self.n_label.setAlignment(Qt.AlignCenter)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)  # 讓 layout 沒有邊框
         layout.addWidget(self.image_label)
+        layout.addWidget(self.n_label)  # 新增：加到 layout
         self.setLayout(layout)
         self.showFullScreen()
 
@@ -141,7 +148,6 @@ class CameraApp(QWidget):
         self.aoi_rect = rect
 
     def handle_match_result(self, mask, mask_mean, mask_min, a, elapsed):
-        self.matching = False
         try:
             threshold = self.control_panel.threshold_spin.value()
             n_erode = self.control_panel.erode_spin.value()
@@ -157,12 +163,18 @@ class CameraApp(QWidget):
         
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.image_label.setPixmap(QPixmap.fromImage(qt_image))
+            self.n_label.setText(f"圈數: {n}")  # 新增：顯示圈數
+            self.matching = False
         except:
             print("handle_match_result crash")
+            self.n_label.setText("")  # 若失敗則清空
+            self.matching = False
 
     def update_frame(self):
         ret, frame = self.cap.read()
         if ret:
+            # 上下左右顛倒
+            frame = cv2.flip(frame, -1)
             self.current_frame = frame
             display_frame = frame.copy()
             if self.aoi_rect:
@@ -175,16 +187,6 @@ class CameraApp(QWidget):
                 else:
                     aoi = None
                     frame_aoi = frame
-                # 修正：避免 thread 尚未結束時重複啟動
-                # if self.match_thread is None:
-                #     print("self.match_thread is None")
-                    
-                # if self.matching:
-                #     print("self.matching ")
-                    
-                # if self.match_thread.isRunning() :
-                #     print("self.match_thread.isRunning()")
-                    #return
                 try:
                     if not self.matching and (self.match_thread is None or not self.match_thread.isRunning()):
                         self.matching = True
@@ -198,28 +200,29 @@ class CameraApp(QWidget):
                         self.match_thread.finished.connect(self.match_thread.deleteLater)
                         self.match_thread.start()
                 except:
+                    self.match_thread = None
                     print("self.matching crash")
-                # 若正在比對，顯示暫存畫面
-                # rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                # h, w, ch = rgb_image.shape
-                # bytes_per_line = ch * w
-                # qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                # self.image_label.setPixmap(QPixmap.fromImage(qt_image))
+                    print("self.matching = " , self.matching)
+                    print("self.match_thread = " , self.match_thread)
+                    #print("self.match_thread.isRunning() = " , self.match_thread.isRunning())
             else:
                 rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-            
+                self.n_label.setText("")  # 新增：沒比對時清空圈數
+        # ...existing code...
     def snapshot_image(self):
         if self.current_frame is not None:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            folder = self.control_panel.folder_combo.currentText()
+            # 優先用 control_panel.folder_path
+            folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else None
             filename = f"snapshot_{timestamp}.bmp"
-            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
             if folder:
-                save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder, filename)
+                save_path = os.path.join(folder, filename)
+            else:
+                save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
             cv2.imwrite(save_path, self.current_frame)
 
     def set_sample(self):
@@ -255,9 +258,13 @@ class CameraApp(QWidget):
         event.accept()
 
     def keyPressEvent(self, event):
-        if event.key() == 16777216:  # Qt.Key_Escape
+        if event.key() == Qt.Key_Escape:
             self.control_panel.close()  # 新增：關閉 ControlPanel
             self.close()
+        elif event.key() == Qt.Key_P:  # 新增：按下 P 鍵叫出 panel 並顯示在最上層
+            self.control_panel.show()
+            self.control_panel.raise_()
+            self.control_panel.activateWindow()
         else:
             super().keyPressEvent(event)
 
