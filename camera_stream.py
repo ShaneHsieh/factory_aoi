@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt, QObject, QThread
+from PyQt5.QtWidgets import QMessageBox
 
 class AOILabel(QLabel):
     aoi_rect_changed = pyqtSignal(object)  # 新增 AOI 區域變更訊號
@@ -222,10 +223,10 @@ class CameraApp(QWidget):
                 self.image_label.setPixmap(QPixmap.fromImage(qt_image))
                 self.n_label.setText("")  # 新增：沒比對時清空圈數
         # ...existing code...
+    
     def snapshot_image(self):
         if self.current_frame is not None:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            # 優先用 control_panel.folder_path
             folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else None
             filename = f"snapshot_{timestamp}.bmp"
             if folder:
@@ -233,6 +234,21 @@ class CameraApp(QWidget):
             else:
                 save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
             cv2.imwrite(save_path, self.current_frame)
+            # 修正：將 QMessageBox 存為 self 屬性，避免被垃圾回收
+            if hasattr(self, 'snapshot_msg') and self.snapshot_msg is not None:
+                self.snapshot_msg.close()
+                self.snapshot_msg = None
+            self.snapshot_msg = QMessageBox()
+            self.snapshot_msg.setWindowTitle("拍照完成")
+            self.snapshot_msg.setText(f"已儲存於：\n{save_path}")
+            self.snapshot_msg.setStandardButtons(QMessageBox.Ok)
+            self.snapshot_msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.snapshot_msg.show()
+            def close_msg():
+                if self.snapshot_msg is not None:
+                    self.snapshot_msg.close()
+                    self.snapshot_msg = None
+            QTimer.singleShot(5000, close_msg)  # 5秒後自動關閉
 
     def set_sample(self):
         folder = self.control_panel.folder_combo.currentText()
@@ -240,14 +256,12 @@ class CameraApp(QWidget):
             if self.goldens is not None:
                 self.goldens = []
                 return
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
             return
         self.goldens = []
         base_path = os.path.dirname(os.path.abspath(__file__))
         folder_path = os.path.join(base_path, folder)
         if not os.path.isdir(folder_path):
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "設定檢測樣本", "資料夾不存在！")
             return
         files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.bmp')]
