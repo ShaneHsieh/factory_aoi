@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt, QObject, QThread
 from PyQt5.QtWidgets import QMessageBox
+from pygrabber.dshow_graph import FilterGraph
 
 class AOILabel(QLabel):
     aoi_rect_changed = pyqtSignal(object)  # 新增 AOI 區域變更訊號
@@ -103,28 +104,29 @@ class CameraApp(QWidget):
         super().__init__()
         self.setWindowTitle("Camera Stream (Local UI)")
 
-        self.video_width = 2560
-        self.video_height = 1440
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        
-        if not self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUY2')):
-            print("Can not set YUY2")
-        if not self.cap.set(cv2.CAP_PROP_FPS, 5):
-            print("Can not set FPS to 5")
-        if not self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width):
-            print("Can not set frame width to", self.video_width)
-        if not self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height):
-            print("Can not set frame height to", self.video_height)
-        if not self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25):
-            print("Can not set auto exposure to 0.25")
-        if not self.cap.set(cv2.CAP_PROP_EXPOSURE, -5):
-            print("Can not set exposure to -5")
-        if not self.cap.set(cv2.CAP_PROP_AUTO_WB, 0):
-            print("Can not set auto white balance to 0")
-        if not self.cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000):
-            print("Can not set white balance blue U to 4000")
-        if not self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0):
-            print("Can not set autofocus to 0")
+        graph = FilterGraph()
+        for i, name in enumerate(graph.get_input_devices()):
+            if "SC0710 PCI, Video 01 Capture" in name:
+                self.cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                self.video_width = 3840
+                self.video_height = 2160
+                if not self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_width):
+                    print("Can not set frame width to", self.video_width)
+                if not self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height):
+                    print("Can not set frame height to", self.video_height)
+                break
+            elif "NeuroEye" in name:
+                temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                if not temp_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25):
+                    print("Can not set auto exposure to 0.25")
+                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -5):
+                    print("Can not set exposure to -5")
+                if not temp_cap.set(cv2.CAP_PROP_AUTO_WB, 0):
+                    print("Can not set auto white balance to 0")
+                if not temp_cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000):
+                    print("Can not set white balance blue U to 4000")
+
+                temp_cap.release()
 
         self.image_label = AOILabel()
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 image_label 填滿
@@ -185,7 +187,7 @@ class CameraApp(QWidget):
         if ret:
             # 上下左右顛倒
             frame = cv2.flip(frame, -1)
-            self.current_frame = frame
+            self.current_frame = frame.copy()
             display_frame = frame.copy()
             if self.aoi_rect:
                 t, b, l, r = self.aoi_rect
@@ -224,8 +226,20 @@ class CameraApp(QWidget):
                 self.n_label.setText("")  # 新增：沒比對時清空圈數
         # ...existing code...
     
-    def snapshot_image(self):
+    def snapshot_image(self, retry_count=5):
+        if retry_count == False :
+            retry_count = 5
         if self.current_frame is not None:
+            frame_copy = self.current_frame.copy()
+            if frame_copy.max() == 0:
+                if retry_count > 0:
+                    print(f"frame is all black, retrying... ({4 - retry_count}/3)")
+                    QTimer.singleShot(100, lambda: self.snapshot_image(retry_count=retry_count-1))
+                    return
+                else:
+                    print("frame is all black after 3 retries, abort snapshot.")
+                    QMessageBox.warning(self, "拍照失敗", "連續 3 次取得的影像皆為全黑，請檢查攝影機狀態。")
+                    return
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else None
             filename = f"snapshot_{timestamp}.bmp"
@@ -233,8 +247,7 @@ class CameraApp(QWidget):
                 save_path = os.path.join(folder, filename)
             else:
                 save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-            cv2.imwrite(save_path, self.current_frame)
-            # 修正：將 QMessageBox 存為 self 屬性，避免被垃圾回收
+            cv2.imwrite(save_path, frame_copy)
             if hasattr(self, 'snapshot_msg') and self.snapshot_msg is not None:
                 self.snapshot_msg.close()
                 self.snapshot_msg = None
