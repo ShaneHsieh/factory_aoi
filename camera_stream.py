@@ -171,7 +171,7 @@ class CameraApp(QWidget):
                 temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
                 if not temp_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25):
                     print("Can not set auto exposure to 0.25")
-                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -5):
+                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -6):
                     print("Can not set exposure to -5")
                 if not temp_cap.set(cv2.CAP_PROP_AUTO_WB, 0):
                     print("Can not set auto white balance to 0")
