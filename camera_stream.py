@@ -155,8 +155,8 @@ class CameraApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Camera Stream (Local UI)")
-
         graph = FilterGraph()
+        temp_cap = None
         for i, name in enumerate(graph.get_input_devices()):
             if "SC0710 PCI, Video 01 Capture" in name:
                 self.cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
@@ -178,8 +178,18 @@ class CameraApp(QWidget):
                 if not temp_cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000):
                     print("Can not set white balance blue U to 4000")
 
-                temp_cap.release()
-        
+                #temp_cap.release()
+        if not hasattr(self, 'cap'):
+            QMessageBox.warning(self, "採集卡失效", "SC0710 找不到")
+            sys.exit(1)
+
+        if temp_cap is None:
+            QMessageBox.warning(self, "Type C 沒有接上", "Type C 沒有接上")
+            sys.exit(1)
+        else:
+            temp_cap.release()
+
+
         self.display_video = True 
         self.current_frame = None
 
@@ -266,7 +276,7 @@ class CameraApp(QWidget):
     def handle_manual_match(self):
         if self.current_frame is not None and self.goldens and not self.matching :
             frame = self.current_frame.copy()
-            today = time.strftime("%Y%m%d")
+            today = "AOI_" + time.strftime("%Y%m%d")
             base_path = os.path.dirname(os.path.abspath(__file__))
             save_dir = os.path.join(base_path, today)
             self.last_frame = self.snapshot_path(self.current_frame , save_dir)
@@ -352,7 +362,8 @@ class CameraApp(QWidget):
             base_path = os.path.dirname(os.path.abspath(__file__))
             folder = os.path.join(base_path, folder_path)
             os.makedirs(folder, exist_ok=True)
-
+            if not hasattr(self, 'last_frame') or self.last_frame is None:
+                return
             filename = os.path.basename(self.last_frame)
             new_path = os.path.join(folder, filename)
             shutil.copy(self.last_frame, new_path)
@@ -366,7 +377,8 @@ class CameraApp(QWidget):
             base_path = os.path.dirname(os.path.abspath(__file__))
             folder = os.path.join(base_path, folder_path)
             os.makedirs(folder, exist_ok=True)
-
+            if not hasattr(self, 'last_frame') or self.last_frame is None:
+                return
             filename = os.path.basename(self.last_frame)
             new_path = os.path.join(folder, filename)
             shutil.copy(self.last_frame, new_path)
@@ -396,7 +408,8 @@ class CameraApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = CameraApp()
-    panel = win.control_panel
-    win.showFullScreen()
-    panel.show()
+    if win is not None:
+        panel = win.control_panel
+        win.showFullScreen()
+        panel.show()
     sys.exit(app.exec_())

@@ -114,7 +114,8 @@ class ControlPanel(QWidget):
         folders = [
             name for name in os.listdir(base_path)
             if os.path.isdir(os.path.join(base_path, name))
-            and name not in ['.ipynb_checkpoints', 'templates','.git','__pycache__']
+            and name not in ['.ipynb_checkpoints', 'templates','.git','__pycache__','Shane' ,'nagetive_samples']
+            and 'AOI_202' not in name 
         ]
         self.folder_combo.blockSignals(True)
         self.folder_combo.clear()
