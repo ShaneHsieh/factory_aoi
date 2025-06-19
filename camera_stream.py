@@ -3,6 +3,7 @@ import os
 import cv2
 import time
 import numpy as np
+import shutil
 
 from match_template import cv_aoi
 from control_panel import ControlPanel
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
 )
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt, QObject, QThread
+from PyQt5.QtCore import QTimer, pyqtSignal, QPoint, Qt, QObject, QThread, QWaitCondition, QMutex
 from PyQt5.QtWidgets import QMessageBox
 from pygrabber.dshow_graph import FilterGraph
 
@@ -84,20 +85,71 @@ class AOILabel(QLabel):
         self.aoi_rect_changed.emit(self.aoi_rect)
 
 class AOIMatchWorker(QObject):
-    finished = pyqtSignal(object, object, object, object, float)
-    def __init__(self, aoi_model, frame, goldens, aoi):
+    match_done = pyqtSignal(object, int)  # 改用 match_done signal
+    def __init__(self, aoi_model):
         super().__init__()
         self.aoi_model = aoi_model
+        self.frame = None
+        self.goldens = None
+        self.aoi = None
+        self.threshold = None
+        self.n_erode = None
+        self.n_dilate = None
+        self.min_samples = None
+        # 新增：QWaitCondition 與 QMutex
+        self._wait_cond = QWaitCondition()
+        self._mutex = QMutex()
+        self._should_run = False
+        self._running = True  # 控制 while 迴圈
+
+    def set_params(self, frame, goldens, aoi, threshold, n_erode, n_dilate, min_samples):
         self.frame = frame
         self.goldens = goldens
         self.aoi = aoi
+        self.threshold = threshold
+        self.n_erode = n_erode
+        self.n_dilate = n_dilate
+        self.min_samples = min_samples
+
     def run(self):
-        import time
-        start_time = time.time()
-        mask, mask_mean, mask_min, a , index= self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
-        end_time = time.time()        
-        print(f"frame = {self.frame.shape} time = {end_time - start_time}  , index = {index}")
-        self.finished.emit(mask, mask_mean, mask_min, a, end_time - start_time)
+        while self._running:
+            self._mutex.lock()
+            if not self._should_run:
+                self._wait_cond.wait(self._mutex)
+            self._should_run = False
+            self._mutex.unlock()
+            if not self._running:
+                break
+            # 執行比對
+            if self.frame is None or self.goldens is None:
+                self.match_done.emit(None, -1)
+                continue
+            import time
+            start_time = time.time()
+            mask, mask_mean, mask_min, a , index= self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
+            circle_image , n  = self.match_result(mask_min, a)
+            end_time = time.time()        
+            print(f"frame = {self.frame.shape} time = {end_time - start_time}  , index = {index}")
+            self.match_done.emit(circle_image, n)
+
+    def wake(self):
+        self._mutex.lock()
+        self._should_run = True
+        self._wait_cond.wakeOne()
+        self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._should_run = True
+        self._wait_cond.wakeOne()
+        self._mutex.unlock()
+
+    def match_result(self, mask_min, a):
+        m = self.aoi_model.post_proc(mask_min, self.threshold, self.n_erode, self.n_dilate)
+        #res = (np.stack([np.maximum(m,a[:,:,0]) , a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
+        res = (np.stack([a[:,:,0]*(m==0), a[:,:,1]*(m==0)  ,np.maximum(m,a[:,:,2]) ], axis=-1))
+        return self.aoi_model.draw_circle(m, res, min_samples=self.min_samples)
 
 class CameraApp(QWidget):
     def __init__(self):
@@ -127,6 +179,9 @@ class CameraApp(QWidget):
                     print("Can not set white balance blue U to 4000")
 
                 temp_cap.release()
+        
+        self.display_video = True 
+        self.current_frame = None
 
         self.image_label = AOILabel()
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 image_label 填滿
@@ -146,39 +201,37 @@ class CameraApp(QWidget):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        self.timer.start(30)
+        self.timer.start(16)
 
-        self.current_frame = None
         self.aoi_model = cv_aoi()
         self.goldens = []
         self.aoi_rect = None  # 用於同步 AOI 狀態
         self.matching = False  # 新增：避免重複啟動 worker
-        
-        self.match_thread = None
+        # 新增：常駐 thread/worker
+        self.match_thread = QThread()
+        self.worker = AOIMatchWorker(self.aoi_model)
+        self.worker.moveToThread(self.match_thread)
+        self.worker.match_done.connect(self.show_image)
+        self.match_thread.started.connect(self.worker.run)
+        self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
 
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
 
-    def handle_match_result(self, mask, mask_mean, mask_min, a, elapsed):
+    def show_image(self, display_image , circle_count):
+        if display_image is None:
+            print("display_image is None")
+            return
         try:
-            threshold = self.control_panel.threshold_spin.value()
-            n_erode = self.control_panel.erode_spin.value()
-            n_dilate = self.control_panel.dilate_spin.value()
-            min_samples = self.control_panel.min_samples_spin.value()
-            m = self.aoi_model.post_proc(mask_min, threshold, n_erode, n_dilate)
-            res = (np.stack([np.maximum(m,a[:,:,0]), a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
-            circle_image , n = self.aoi_model.draw_circle(m, res, min_samples=min_samples)
-            #print("draw circle", n , "clusters")
-            rgb_image = circle_image.copy()
+            rgb_image = display_image.copy() if display_image is not None else np.zeros((100,100,3), dtype=np.uint8)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
-        
-            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
             self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-            self.n_label.setText(f"圈數: {n}")  # 新增：顯示圈數
+            self.n_label.setText(f"圈數: {circle_count}")  # 新增：顯示圈數
             self.matching = False
         except:
-            print("handle_match_result crash")
+            print("show_image crash")
             self.n_label.setText("")  # 若失敗則清空
             self.matching = False
 
@@ -188,86 +241,74 @@ class CameraApp(QWidget):
             # 上下左右顛倒
             frame = cv2.flip(frame, -1)
             self.current_frame = frame.copy()
-            display_frame = frame.copy()
+            if self.display_video == True:
+                display_frame = frame.copy()
+                if self.aoi_rect:
+                    t, b, l, r = self.aoi_rect
+                    cv2.rectangle(display_frame, (l, t), (r, b), (0, 0, 255), 4)
+                self.show_image(display_frame, -1) 
+
+    def snapshot_path(self, frame, path , message=False):
+        if not os.path.isdir(path):
+            os.makedirs(path)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"snapshot_{timestamp}.bmp"
+        save_path = os.path.join(path, filename)
+        cv2.imwrite(save_path, frame)
+
+        if message == False:
+            return save_path
+
+        self.show_message_box("拍照完成", f"已儲存於：\n{save_path}")
+
+        return save_path
+
+    def handle_manual_match(self):
+        if self.current_frame is not None and self.goldens and not self.matching :
+            frame = self.current_frame.copy()
+            today = time.strftime("%Y%m%d")
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            save_dir = os.path.join(base_path, today)
+            self.last_frame = self.snapshot_path(self.current_frame , save_dir)
+
+            self.display_video = False
             if self.aoi_rect:
                 t, b, l, r = self.aoi_rect
-                cv2.rectangle(display_frame, (l, t), (r, b), (0, 0, 255), 4)
-            if self.goldens:
-                if self.aoi_rect:
-                    aoi = self.aoi_rect
-                    frame_aoi = frame[aoi[0]:aoi[1], aoi[2]:aoi[3]]
-                else:
-                    aoi = None
-                    frame_aoi = frame
-                try:
-                    if not self.matching and (self.match_thread is None or not self.match_thread.isRunning()):
-                        self.matching = True
-                        self.match_thread = QThread()
-                        self.worker = AOIMatchWorker(self.aoi_model, frame_aoi, self.goldens, aoi)
-                        self.worker.moveToThread(self.match_thread)
-                        self.match_thread.started.connect(self.worker.run)
-                        self.worker.finished.connect(self.handle_match_result)
-                        self.worker.finished.connect(self.worker.deleteLater)
-                        self.worker.finished.connect(self.match_thread.quit)
-                        self.match_thread.finished.connect(self.match_thread.deleteLater)
-                        self.match_thread.start()
-                except:
-                    self.match_thread = None
-                    print("self.matching crash")
-                    print("self.matching = " , self.matching)
-                    print("self.match_thread = " , self.match_thread)
-                    #print("self.match_thread.isRunning() = " , self.match_thread.isRunning())
+                frame_aoi = frame[t:b, l:r]
             else:
-                rgb_image = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_image.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-                self.n_label.setText("")  # 新增：沒比對時清空圈數
-        # ...existing code...
-    
-    def snapshot_image(self, retry_count=5):
+                frame_aoi = frame
+            threshold = self.control_panel.threshold_spin.value()
+            n_erode = self.control_panel.erode_spin.value()
+            n_dilate = self.control_panel.dilate_spin.value()
+            min_samples = self.control_panel.min_samples_spin.value()
+            self.worker.set_params(frame_aoi, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
+            self.matching = True
+            self.worker.wake()  # 用 wake 觸發 worker 執行
+
+    def snapshot_positive_image(self, retry_count=5):
         if retry_count == False :
             retry_count = 5
         if self.current_frame is not None:
             frame_copy = self.current_frame.copy()
             if frame_copy.max() == 0:
                 if retry_count > 0:
-                    print(f"frame is all black, retrying... ({4 - retry_count}/3)")
-                    QTimer.singleShot(100, lambda: self.snapshot_image(retry_count=retry_count-1))
+                    print(f"frame is all black, retrying... ({6 - retry_count}/ {retry_count})")
+                    QTimer.singleShot(100, lambda: self.snapshot_positive_image(retry_count=retry_count-1))
                     return
                 else:
                     print("frame is all black after 3 retries, abort snapshot.")
                     QMessageBox.warning(self, "拍照失敗", "連續 3 次取得的影像皆為全黑，請檢查攝影機狀態。")
                     return
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else None
-            filename = f"snapshot_{timestamp}.bmp"
-            if folder:
-                save_path = os.path.join(folder, filename)
-            else:
-                save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-            cv2.imwrite(save_path, frame_copy)
-            if hasattr(self, 'snapshot_msg') and self.snapshot_msg is not None:
-                self.snapshot_msg.close()
-                self.snapshot_msg = None
-            self.snapshot_msg = QMessageBox()
-            self.snapshot_msg.setWindowTitle("拍照完成")
-            self.snapshot_msg.setText(f"已儲存於：\n{save_path}")
-            self.snapshot_msg.setStandardButtons(QMessageBox.Ok)
-            self.snapshot_msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-            self.snapshot_msg.show()
-            def close_msg():
-                if self.snapshot_msg is not None:
-                    self.snapshot_msg.close()
-                    self.snapshot_msg = None
-            QTimer.singleShot(5000, close_msg)  # 5秒後自動關閉
+                
+            folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else os.path.dirname(os.path.abspath(__file__))
+            self.snapshot_path(frame_copy , folder , message=True)
 
     def set_sample(self):
         folder = self.control_panel.folder_combo.currentText()
         if not folder:
             if self.goldens is not None:
                 self.goldens = []
+                self.display_video = True 
                 return
             QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
             return
@@ -279,9 +320,8 @@ class CameraApp(QWidget):
             return
         files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.bmp')]
         if not files:
-            msg = "該資料夾內沒有 bmp 檔案。"
-        else:
-            msg = "\n".join(files)
+            QMessageBox.information(self, "設定檢測樣本", "資料夾內無BMP檔！")
+            return
         
         for img_path in files:
             golden_img = cv2.imread(img_path)
@@ -292,6 +332,7 @@ class CameraApp(QWidget):
         self.cap.release()
         # 修正：確保 thread 已結束
         if self.match_thread is not None and self.match_thread.isRunning():
+            self.worker.stop()  # 通知 worker 結束 while 迴圈
             self.match_thread.quit()
             self.match_thread.wait()
         event.accept()
@@ -304,8 +345,53 @@ class CameraApp(QWidget):
             self.control_panel.show()
             self.control_panel.raise_()
             self.control_panel.activateWindow()
+        elif event.key() == Qt.Key_Space:  # 新增：空白鍵觸發手動圈數計算
+            self.handle_manual_match()
+        elif event.key() == Qt.Key_F1:
+            folder_path = self.control_panel.folder_combo.currentText()
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            folder = os.path.join(base_path, folder_path)
+            os.makedirs(folder, exist_ok=True)
+
+            filename = os.path.basename(self.last_frame)
+            new_path = os.path.join(folder, filename)
+            shutil.copy(self.last_frame, new_path)
+            message_text = f"已新增正樣本圖片到 {new_path}"
+            self.show_message_box("新增正樣本", message_text, 3000)
+            self.set_sample()
+
+        elif event.key() == Qt.Key_F2:
+            # F2: 你可以在這裡加上你要的功能
+            folder_path = "nagetive_samples"
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            folder = os.path.join(base_path, folder_path)
+            os.makedirs(folder, exist_ok=True)
+
+            filename = os.path.basename(self.last_frame)
+            new_path = os.path.join(folder, filename)
+            shutil.copy(self.last_frame, new_path)
+
+            folder = f"已保存未檢測到瑕疵圖片 {new_path}"
+            self.show_message_box("未檢測到", folder, 3000)
         else:
             super().keyPressEvent(event)
+
+    def show_message_box(self, title, text, close_time=5000):
+        if hasattr(self, 'msg') and self.msg is not None:
+            self.msg.close()
+            self.msg = None
+        self.msg = QMessageBox()
+        self.msg.setWindowTitle(title)
+        self.msg.setText(text)
+        self.msg.setStandardButtons(QMessageBox.Ok)
+        self.msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.msg.show()
+
+        def close_msg():
+            if self.msg is not None:
+                self.msg.close()
+
+        QTimer.singleShot(close_time, close_msg)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

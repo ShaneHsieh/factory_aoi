@@ -81,7 +81,7 @@ class ControlPanel(QWidget):
         self.folder_label.setFont(ui_font)
         self.capture_btn = QPushButton("📸")
         self.capture_btn.setFont(ui_font)
-        self.capture_btn.clicked.connect(self.camera_app.snapshot_image)
+        self.capture_btn.clicked.connect(self.camera_app.snapshot_positive_image)
         self.capture_btn.setFixedWidth(120)
         folder_hbox = QHBoxLayout()
         folder_hbox.addWidget(self.open_folder_btn)

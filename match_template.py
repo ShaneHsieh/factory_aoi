@@ -117,7 +117,7 @@ class cv_aoi:
         
         clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(p)
         n,c = np.unique(clustering.labels_, return_counts=1)
-        res = cv2.cvtColor(res, cv2.COLOR_BGR2RGB)
+        #res = cv2.cvtColor(res, cv2.COLOR_BGR2RGB)
         for i in n:
             if i>=0:
                 pp = p[clustering.labels_==i]
