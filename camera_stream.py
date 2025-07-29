@@ -166,19 +166,24 @@ class CameraApp(QWidget):
                     print("Can not set frame width to", self.video_width)
                 if not self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_height):
                     print("Can not set frame height to", self.video_height)
-                break
             elif "NeuroEye" in name:
                 temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                if not temp_cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25):
-                    print("Can not set auto exposure to 0.25")
-                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -6):
-                    print("Can not set exposure to -5")
+                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -8):
+                    print("Can not set exposure to -8")
                 if not temp_cap.set(cv2.CAP_PROP_AUTO_WB, 0):
                     print("Can not set auto white balance to 0")
                 if not temp_cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 4000):
                     print("Can not set white balance blue U to 4000")
-
+                if not temp_cap.set(cv2.CAP_PROP_SETTINGS, 1):
+                    print("Can not open camera settings")
+                if not temp_cap.set(cv2.CAP_PROP_BRIGHTNESS, 100):
+                    print("Can not set brightness to 100")
+                if not temp_cap.set(cv2.CAP_PROP_CONTRAST, 100):
+                    print("Can not set contrast to 100")
+                if not temp_cap.set(cv2.CAP_PROP_SHARPNESS, 0):
+                    print("Can not set sharpness to 0")
                 #temp_cap.release()
+
         if not hasattr(self, 'cap'):
             QMessageBox.warning(self, "採集卡失效", "SC0710 找不到")
             sys.exit(1)
