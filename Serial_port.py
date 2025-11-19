@@ -70,29 +70,3 @@ class SerialDevice:
         self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._read_thread.start()
         print("📡 Start listening for incoming data")
-
-# === 使用範例 ===
-if __name__ == "__main__":
-    # 將這裡的 COM3 改成你的實際 port
-    dev = SerialDevice(port="COM7", baudrate=115200)
-    dev.open()
-    dev.start_reading()
-
-    try:
-        while True:
-            print("Enter command to send (type 'END' on a new line to finish, or 'exit' to quit):")
-            lines = []
-            while True:
-                line = input()
-                if line.lower() == "exit":
-                    raise KeyboardInterrupt
-                lines.append(line)
-                if line == "END":
-                    break
-            msg = "\n".join(lines)
-            if msg:
-                dev.write(msg + "\r\n")
-    except KeyboardInterrupt:
-        pass
-    finally:
-        dev.close()

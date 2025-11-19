@@ -7,6 +7,7 @@ import shutil
 
 from match_template import cv_aoi
 from control_panel import ControlPanel
+from LT_300H_control import LT300HControl 
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
@@ -229,6 +230,15 @@ class CameraApp(QWidget):
         self.worker.match_done.connect(self.show_image)
         self.match_thread.started.connect(self.worker.run)
         self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
+
+        self.LT_300H_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
+        self.LT_300H_dev.open()
+        self.LT_300H_dev.start_reading()
+        self.LT_300H_dev.set_move_speed(100)
+        self.LT_300H_dev.move_to(0, 0, 0)
+        time.sleep(0.5)  # 等待回應
+        self.LT_300H_dev.cur_x, self.LT_300H_dev.cur_y, self.LT_300H_dev.cur_z = self.LT_300H_dev.last_line.split(",")
+        # width 104 mm heights 60 mm
 
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
