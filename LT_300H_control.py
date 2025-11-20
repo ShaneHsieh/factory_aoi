@@ -1,18 +1,43 @@
 from Serial_port import SerialDevice 
 import time
+import numpy as np
 
 import random 
 
 class LT300HControl(SerialDevice):
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
         super().__init__(port, baudrate, timeout)
-        self.get_current_position()#100.001,100.002,0.000
+        self.open()
+        self.start_reading()
+        self.set_move_speed(100)
+        #self.get_current_position()#100.001,100.002,0.000
         time.sleep(0.5)  # 等待回應
-        self.cur_x, self.cur_y, self.cur_z = dev.last_line.split(",")
+        self.limit_x = (0, 300)
+        self.limit_y = (0, 300)
+        self.limit_z = (0, 100)
+        self.cur_x = 0 
+        self.cur_y = 0
+        self.cur_z = 0
+        
+        self.move_to(0, 0 ,75)
+    
+    def clamp(self, value, limit):
+        """自動修正到極限範圍內"""
+        return float(np.clip(value, limit[0], limit[1]))
 
     def move_to(self, x: float, y: float, z: float):
-        print(f"移動到: X={x}, Y={y}, Z={z}")
-        command = f"H\r\nMA {x},{y},{z}\r\nEND\r\n"
+        x = float(x)
+        y = float(y)
+        z = float(z)
+
+        x_clamped = self.clamp(x, self.limit_x)
+        y_clamped = self.clamp(y, self.limit_y)
+        z_clamped = self.clamp(z, self.limit_z)
+
+        print(f"✓ 修正後移動: X={x_clamped}, Y={y_clamped}, Z={z_clamped}")
+
+        # 下指令
+        command = f"H\r\nMA {x_clamped},{y_clamped},{z_clamped}\r\nEND\r\n"
         self.write(command)
     
     def set_move_speed(self, speed: int):
@@ -24,11 +49,8 @@ class LT300HControl(SerialDevice):
         self.write(command)
 
 if __name__ == "__main__":
-    dev = LT300HControl(port="COM8", baudrate=115200, timeout=1.0)
-    dev.open()
-    dev.start_reading()
-    dev.set_move_speed(100)
-    time.sleep(2)  # 等待連線穩定
+    dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+    time.sleep(2)  # 等待連線穩定 
     try:
         while True:
             print("Enter command to send (type 'END' on a new line to finish, or 'exit' to quit):")

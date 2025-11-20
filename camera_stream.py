@@ -155,6 +155,17 @@ class AOIMatchWorker(QObject):
 class CameraApp(QWidget):
     def __init__(self):
         super().__init__()
+
+        self.LT_300H_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+        # width 104 mm heights 60 mm
+        if self.LT_300H_dev.ser is None:
+            print("RS232 連接有誤")
+            QMessageBox.warning(self, "RS232 沒有接上", "無法控制攝影機")
+            sys.exit(1)
+
+        # x 方向：1 表示向右 (0->200)，-1 表示向左 (200->0)
+        self._x_dir = 1
+
         self.setWindowTitle("Camera Stream (Local UI)")
         graph = FilterGraph()
         temp_cap = None
@@ -195,7 +206,6 @@ class CameraApp(QWidget):
         else:
             temp_cap.release()
 
-
         self.display_video = True 
         self.current_frame = None
 
@@ -231,14 +241,6 @@ class CameraApp(QWidget):
         self.match_thread.started.connect(self.worker.run)
         self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
 
-        self.LT_300H_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
-        self.LT_300H_dev.open()
-        self.LT_300H_dev.start_reading()
-        self.LT_300H_dev.set_move_speed(100)
-        self.LT_300H_dev.move_to(0, 0, 0)
-        time.sleep(0.5)  # 等待回應
-        self.LT_300H_dev.cur_x, self.LT_300H_dev.cur_y, self.LT_300H_dev.cur_z = self.LT_300H_dev.last_line.split(",")
-        # width 104 mm heights 60 mm
 
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
@@ -354,6 +356,7 @@ class CameraApp(QWidget):
             self.goldens.append([golden_img, kp, des])
 
     def closeEvent(self, event):
+        self.LT_300H_dev.close()
         self.cap.release()
         # 修正：確保 thread 已結束
         if self.match_thread is not None and self.match_thread.isRunning():
@@ -361,6 +364,71 @@ class CameraApp(QWidget):
             self.match_thread.quit()
             self.match_thread.wait()
         event.accept()
+
+    def move_on_space(self):
+        """按下 Space 時呼叫：交替在 x / y 軸移動。
+        x 範圍 0~200，每次 +100；超過則回 0
+        y 範圍 0~200，每次 +55；超過則回 0
+        z 固定為 75
+        移動後更新 device 上的 cur_x/cur_y/cur_z
+        """
+        try:
+            cur_x = int(float(self.LT_300H_dev.cur_x))
+        except Exception:
+            cur_x = 0
+        try:
+            cur_y = int(float(self.LT_300H_dev.cur_y))
+        except Exception:
+            cur_y = 0
+
+        z = 75
+        #z = 68(隨便擺一片放在粉紅氣泡墊上)
+        # 掃描邏輯（蛇形）：沿 x 方向前進，抵達邊界則在相同 x 做 y 步進，並反向 x
+        step_x = 95
+        step_y = 55
+
+        # 若尚未設定方向，預設向右
+        if not hasattr(self, '_x_dir'):
+            self._x_dir = 1
+
+        next_x = cur_x + (self._x_dir * step_x)
+        new_x = cur_x
+        new_y = cur_y
+
+        # 如果 next_x 在合法範圍內，則沿 x 前進
+        if self.LT_300H_dev.limit_x[0] <= next_x <= self.LT_300H_dev.limit_x[1]:
+            new_x = next_x
+        else:
+            # 已到達邊界，先在相同 x 做 y 步進，再反向 x
+            new_x = cur_x
+            new_y = cur_y + step_y
+            if new_y > self.LT_300H_dev.limit_y[1]:
+                new_y = self.LT_300H_dev.limit_y[0]
+            # 反轉 x 方向，下一次會沿相反方向走
+            self._x_dir *= -1
+
+        print(f"Moving to x={new_x}, y={new_y}, z={z} (x_dir={self._x_dir})")
+        try:
+            # 呼叫裝置移動
+            self.LT_300H_dev.move_to(new_x, new_y, z)
+            # 更新 device 的當前位置
+            self.LT_300H_dev.cur_x = new_x
+            self.LT_300H_dev.cur_y = new_y
+            self.LT_300H_dev.cur_z = z
+
+            # 選擇性拍照儲存（若有影像）
+            if hasattr(self, 'current_frame') and self.current_frame is not None:
+                try:
+                    frame = self.current_frame.copy()
+                    today = "AOI_" + time.strftime("%Y%m%d")
+                    base_path = os.path.dirname(os.path.abspath(__file__))
+                    save_dir = os.path.join(base_path, today)
+                    self.snapshot_path(frame, save_dir, message=False)
+                except Exception as e:
+                    print(f"snapshot during move_on_space failed: {e}")
+
+        except Exception as e:
+            print(f"move_on_space failed: {e}")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -370,9 +438,17 @@ class CameraApp(QWidget):
             self.control_panel.show()
             self.control_panel.raise_()
             self.control_panel.activateWindow()
-        elif event.key() == Qt.Key_Space:  # 新增：空白鍵觸發手動圈數計算
-            self.handle_manual_match()
-        elif event.key() == Qt.Key_F1:
+        elif event.key() == Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
+            # 先移動到下一個位置（交替 x/y）
+            try:
+                self.move_on_space()
+            except Exception as e:
+                print(f"Error during move_on_space: {e}")
+            # 移動後稍做延遲再執行手動比對（保留原本的圈數計算功能）
+            QTimer.singleShot(500, self.handle_manual_match)
+            #self.handle_manual_match()
+
+        elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
             base_path = os.path.dirname(os.path.abspath(__file__))
             folder = os.path.join(base_path, folder_path)
@@ -386,8 +462,7 @@ class CameraApp(QWidget):
             self.show_message_box("新增正樣本", message_text, 3000)
             self.set_sample()
 
-        elif event.key() == Qt.Key_F2:
-            # F2: 你可以在這裡加上你要的功能
+        elif event.key() == Qt.Key_F2: # F2 負樣本
             folder_path = "nagetive_samples"
             base_path = os.path.dirname(os.path.abspath(__file__))
             folder = os.path.join(base_path, folder_path)
@@ -421,10 +496,17 @@ class CameraApp(QWidget):
         QTimer.singleShot(close_time, close_msg)
 
 if __name__ == "__main__":
+    
     app = QApplication(sys.argv)
     win = CameraApp()
-    if win is not None:
-        panel = win.control_panel
-        win.showFullScreen()
-        panel.show()
-    sys.exit(app.exec_())
+    try:
+        if win is not None:
+            panel = win.control_panel
+            win.showFullScreen()
+            panel.show()
+        sys.exit(app.exec_())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        None
+        #win.closeEvent()
