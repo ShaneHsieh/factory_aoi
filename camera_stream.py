@@ -168,7 +168,7 @@ class CameraApp(QWidget):
                     print("Can not set frame height to", self.video_height)
             elif "NeuroEye" in name:
                 temp_cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -8):
+                if not temp_cap.set(cv2.CAP_PROP_EXPOSURE, -5):
                     print("Can not set exposure to -8")
                 if not temp_cap.set(cv2.CAP_PROP_AUTO_WB, 0):
                     print("Can not set auto white balance to 0")
