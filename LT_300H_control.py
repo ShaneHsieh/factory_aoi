@@ -6,6 +6,9 @@ import random
 class LT300HControl(SerialDevice):
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
         super().__init__(port, baudrate, timeout)
+        self.get_current_position()#100.001,100.002,0.000
+        time.sleep(0.5)  # 等待回應
+        self.cur_x, self.cur_y, self.cur_z = dev.last_line.split(",")
 
     def move_to(self, x: float, y: float, z: float):
         print(f"移動到: X={x}, Y={y}, Z={z}")
