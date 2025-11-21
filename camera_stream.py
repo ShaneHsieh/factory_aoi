@@ -4,6 +4,7 @@ import cv2
 import time
 import numpy as np
 import shutil
+import threading
 
 from match_template import cv_aoi
 from control_panel import ControlPanel
@@ -152,6 +153,71 @@ class AOIMatchWorker(QObject):
         res = (np.stack([a[:,:,0]*(m==0), a[:,:,1]*(m==0)  ,np.maximum(m,a[:,:,2]) ], axis=-1))
         return self.aoi_model.draw_circle(m, res, min_samples=self.min_samples)
 
+class SnapshotPositiveWorker(QObject):
+    snapshot_done = pyqtSignal()  # 拍照完成訊號
+    def __init__(self, camera_app):
+        super().__init__()
+        self.camera_app = camera_app
+        self._running = True
+        # self._stop_event = threading.Event()
+        self._wait_cond = QWaitCondition()
+        self._mutex = QMutex()
+        self.start_move = False
+        self.move_check_wait_cond = QWaitCondition()
+        self.move_check_mutex = QMutex()
+
+    def wake(self):
+        self._mutex.lock()
+        self.start_move = True
+        self._wait_cond.wakeOne()
+        self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._wait_cond.wakeOne()
+        self._mutex.unlock()
+        self.start_move = False
+        self.move_check_wait_cond.wakeOne()
+    
+    def run(self):
+        """在背景 thread 中執行拍照迴圈"""
+        while self._running:
+            self._mutex.lock()
+            self._wait_cond.wait(self._mutex)
+            self._mutex.unlock()
+            
+            while self.start_move:
+                frame_copy = self.camera_app.current_frame.copy()
+                while frame_copy.max() == 0:
+                    frame_copy = self.camera_app.current_frame.copy()
+
+                # 上下左右顛倒
+                folder = os.path.join(
+                    self.positive_folder, 
+                    str(self.camera_app.LT_300H_dev.cur_x) + "_" + 
+                    str(self.camera_app.LT_300H_dev.cur_y) + "_" + 
+                    str(self.camera_app.LT_300H_dev.cur_z) + "\\"
+                )
+                
+                self.camera_app.snapshot_path(frame_copy, folder, message=False)
+
+                self.camera_app.move_to_next_position()
+                self.move_check_mutex.lock()
+                self.move_check_wait_cond.wait(self.move_check_mutex)
+                self.move_check_mutex.unlock()
+
+                # 檢查是否回到起點
+                if (self.camera_app.LT_300H_dev.target_x == 0 and 
+                    self.camera_app.LT_300H_dev.target_y == 0):
+                    self.start_move = False
+                    break
+                    
+                time.sleep(0.1)  # 避免 CPU 佔用過高
+            # 拍照完成
+            if self._running == True:
+                self.snapshot_done.emit()
+
 class CameraApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -240,6 +306,20 @@ class CameraApp(QWidget):
         self.worker.match_done.connect(self.show_image)
         self.match_thread.started.connect(self.worker.run)
         self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
+        
+        # 新增：snapshot positive worker
+        self.snapshot_thread = QThread()
+        self.snapshot_worker = SnapshotPositiveWorker(self)
+        self.snapshot_worker.moveToThread(self.snapshot_thread)
+        self.snapshot_worker.snapshot_done.connect(self.on_snapshot_done)
+        self.snapshot_thread.started.connect(self.snapshot_worker.run)
+        self.snapshot_thread.start()
+
+    # 回調函數接收來源
+    def on_position_arrived(self, context):
+        if context == "move_to_next_position":
+            self.snapshot_worker.move_check_wait_cond.wakeOne()
+            #self.handle_manual_match()
 
 
     def on_aoi_rect_changed(self, rect):
@@ -279,7 +359,7 @@ class CameraApp(QWidget):
         if not os.path.isdir(path):
             os.makedirs(path)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"snapshot_{timestamp}.bmp"
+        filename = f"{timestamp}.bmp"
         save_path = os.path.join(path, filename)
         cv2.imwrite(save_path, frame)
 
@@ -312,23 +392,23 @@ class CameraApp(QWidget):
             self.matching = True
             self.worker.wake()  # 用 wake 觸發 worker 執行
 
-    def snapshot_positive_image(self, retry_count=5):
-        if retry_count == False :
-            retry_count = 5
-        if self.current_frame is not None:
-            frame_copy = self.current_frame.copy()
-            if frame_copy.max() == 0:
-                if retry_count > 0:
-                    print(f"frame is all black, retrying... ({6 - retry_count}/ {retry_count})")
-                    QTimer.singleShot(100, lambda: self.snapshot_positive_image(retry_count=retry_count-1))
-                    return
-                else:
-                    print("frame is all black after 3 retries, abort snapshot.")
-                    QMessageBox.warning(self, "拍照失敗", "連續 3 次取得的影像皆為全黑，請檢查攝影機狀態。")
-                    return
-                
-            folder = self.control_panel.folder_save_path if hasattr(self.control_panel, 'folder_save_path') else os.path.dirname(os.path.abspath(__file__))
-            self.snapshot_path(frame_copy , folder , message=True)
+    def snapshot_positive_image(self):
+        """啟動正樣本拍照 (在背景 thread 中執行)"""
+        self.LT_300H_dev.limit_x[1] = 100
+        self.LT_300H_dev.limit_y[1] = 100
+        
+        positive_folder = (self.control_panel.folder_save_path 
+                          if hasattr(self.control_panel, 'folder_save_path') 
+                          else os.path.dirname(os.path.abspath(__file__)))
+        
+        # 啟動背景 thread 執行拍照
+        self.snapshot_worker.positive_folder = positive_folder
+        self.snapshot_worker.wake()
+    
+    def on_snapshot_done(self):
+        """拍照完成時的回調"""
+        print("✅ 正樣本拍照完成")
+        self.show_message_box("拍照完成", "正樣本拍照完成")
 
     def set_sample(self):
         folder = self.control_panel.folder_combo.currentText()
@@ -358,20 +438,22 @@ class CameraApp(QWidget):
     def closeEvent(self, event):
         self.LT_300H_dev.close()
         self.cap.release()
-        # 修正：確保 thread 已結束
+        
+        # 清理 snapshot worker
+        if hasattr(self, 'snapshot_worker'):
+            self.snapshot_worker.stop()
+        if hasattr(self, 'snapshot_thread') and self.snapshot_thread.isRunning():
+            self.snapshot_thread.quit()
+            self.snapshot_thread.wait()
+        
+        # 清理 match worker
         if self.match_thread is not None and self.match_thread.isRunning():
             self.worker.stop()  # 通知 worker 結束 while 迴圈
             self.match_thread.quit()
             self.match_thread.wait()
         event.accept()
 
-    def move_on_space(self):
-        """按下 Space 時呼叫：交替在 x / y 軸移動。
-        x 範圍 0~200，每次 +100；超過則回 0
-        y 範圍 0~200，每次 +55；超過則回 0
-        z 固定為 75
-        移動後更新 device 上的 cur_x/cur_y/cur_z
-        """
+    def move_to_next_position(self):
         try:
             cur_x = int(float(self.LT_300H_dev.cur_x))
         except Exception:
@@ -406,29 +488,14 @@ class CameraApp(QWidget):
                 new_y = self.LT_300H_dev.limit_y[0]
             # 反轉 x 方向，下一次會沿相反方向走
             self._x_dir *= -1
-
-        print(f"Moving to x={new_x}, y={new_y}, z={z} (x_dir={self._x_dir})")
         try:
-            # 呼叫裝置移動
-            self.LT_300H_dev.move_to(new_x, new_y, z)
-            # 更新 device 的當前位置
-            self.LT_300H_dev.cur_x = new_x
-            self.LT_300H_dev.cur_y = new_y
-            self.LT_300H_dev.cur_z = z
-
-            # 選擇性拍照儲存（若有影像）
-            if hasattr(self, 'current_frame') and self.current_frame is not None:
-                try:
-                    frame = self.current_frame.copy()
-                    today = "AOI_" + time.strftime("%Y%m%d")
-                    base_path = os.path.dirname(os.path.abspath(__file__))
-                    save_dir = os.path.join(base_path, today)
-                    self.snapshot_path(frame, save_dir, message=False)
-                except Exception as e:
-                    print(f"snapshot during move_on_space failed: {e}")
+            # 呼叫裝置移動，並傳遞回調函數
+            self.LT_300H_dev.move_to(new_x, new_y, z, 
+                                     callback=self.on_position_arrived,
+                                     context="move_to_next_position")
 
         except Exception as e:
-            print(f"move_on_space failed: {e}")
+            print(f"move_to_next_position failed: {e}")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -441,9 +508,9 @@ class CameraApp(QWidget):
         elif event.key() == Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
             # 先移動到下一個位置（交替 x/y）
             try:
-                self.move_on_space()
+                self.move_to_next_position()
             except Exception as e:
-                print(f"Error during move_on_space: {e}")
+                print(f"Error during move_to_next_position: {e}")
             # 移動後稍做延遲再執行手動比對（保留原本的圈數計算功能）
             QTimer.singleShot(500, self.handle_manual_match)
             #self.handle_manual_match()
@@ -452,6 +519,7 @@ class CameraApp(QWidget):
             folder_path = self.control_panel.folder_combo.currentText()
             base_path = os.path.dirname(os.path.abspath(__file__))
             folder = os.path.join(base_path, folder_path)
+            folder = os.path.join(folder, str(self.LT_300H_dev.cur_x)+"_"+str(self.LT_300H_dev.cur_y)+"_"+str(self.LT_300H_dev.cur_z)+ "\\")
             os.makedirs(folder, exist_ok=True)
             if not hasattr(self, 'last_frame') or self.last_frame is None:
                 return

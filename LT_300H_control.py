@@ -1,6 +1,7 @@
 from Serial_port import SerialDevice 
 import time
 import numpy as np
+import threading
 
 import random 
 
@@ -12,12 +13,21 @@ class LT300HControl(SerialDevice):
         self.set_move_speed(100)
         #self.get_current_position()#100.001,100.002,0.000
         time.sleep(0.5)  # 等待回應
-        self.limit_x = (0, 300)
-        self.limit_y = (0, 300)
-        self.limit_z = (0, 100)
-        self.cur_x = 0 
+        self.limit_x = np.array([0, 300])
+        self.limit_y = np.array([0, 300])
+        self.limit_z = np.array([0, 100])
+        self.cur_x = 0
         self.cur_y = 0
-        self.cur_z = 0
+        self.cur_z = 75
+        
+        # 新增：位置確認相關
+        self.target_x = 0
+        self.target_y = 0
+        self.target_z = 75
+        self._arrive_callback = None  # 回調函數
+        self._callback_context = None  # 回調上下文參數
+        self._checking = False
+        self._check_thread = None
         
         self.move_to(0, 0 ,75)
     
@@ -25,7 +35,7 @@ class LT300HControl(SerialDevice):
         """自動修正到極限範圍內"""
         return float(np.clip(value, limit[0], limit[1]))
 
-    def move_to(self, x: float, y: float, z: float):
+    def move_to(self, x: float, y: float, z: float, callback=None, context=None):
         x = float(x)
         y = float(y)
         z = float(z)
@@ -39,6 +49,51 @@ class LT300HControl(SerialDevice):
         # 下指令
         command = f"H\r\nMA {x_clamped},{y_clamped},{z_clamped}\r\nEND\r\n"
         self.write(command)
+
+        # 儲存目標位置和回調函數
+        self.target_x = x_clamped
+        self.target_y = y_clamped
+        self.target_z = z_clamped
+        self._arrive_callback = callback
+        self._callback_context = context
+
+        # 啟動背景檢查執行緒
+        if callback:
+            self._start_arrival_check()
+    
+    def _start_arrival_check(self):
+        """啟動背景執行緒檢查是否到達"""
+        if self._checking:
+            return
+        self._checking = True
+        self._check_thread = threading.Thread(target=self._check_arrival, daemon=True)
+        self._check_thread.start()
+    
+    def _check_arrival(self):
+        """背景執行緒：持續檢查是否到達目標位置"""
+        max_wait = 60  # 最多等待 60 秒
+        start_time = time.time()
+        
+        while self._checking and (time.time() - start_time) < max_wait:
+            self.get_current_position()
+            
+            if (abs(self.cur_x - self.target_x) < 0.01 and 
+                abs(self.cur_y - self.target_y) < 0.01 and 
+                abs(self.cur_z - self.target_z) < 0.01):
+                
+                self._checking = False
+                
+                # 呼叫回調函數，並傳入上下文參數
+                if self._arrive_callback:
+                    self._arrive_callback(self._callback_context)
+                break
+            
+            time.sleep(0.5)
+        
+        if self._checking:
+            print("⚠️ 超時：未在指定時間內到達目標位置")
+            self._checking = False
+    
     
     def set_move_speed(self, speed: int):
         command = f"H\r\nSP {speed}\r\nEND\r\n"
@@ -47,6 +102,16 @@ class LT300HControl(SerialDevice):
     def get_current_position(self):
         command = "H\r\nPA\r\nEND\r\n"
         self.write(command)
+        time.sleep(0.3)
+        if self.last_line:
+            try:
+                cur_x, cur_y, cur_z = self.last_line.split(",")
+                self.cur_x = int(round(float(cur_x)))
+                self.cur_y = int(round(float(cur_y)))
+                self.cur_z = int(round(float(cur_z)))
+            except Exception as e:
+                print(f"⚠️ 解析位置資料失敗: {e}")
+
 
 if __name__ == "__main__":
     dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
