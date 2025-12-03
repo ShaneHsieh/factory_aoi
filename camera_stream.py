@@ -432,7 +432,7 @@ class CameraApp(QWidget):
         
         for img_path in files:
             golden_img = cv2.imread(img_path)
-            kp, des = self.aoi_model.get_keypoint(golden_img)
+            kp, des = self.aoi_model.get_keypoint_grid(golden_img)
             self.goldens.append([golden_img, kp, des])
 
     def closeEvent(self, event):
