@@ -396,7 +396,7 @@ class CameraApp(QWidget):
             n_erode = self.control_panel.erode_spin.value()
             n_dilate = self.control_panel.dilate_spin.value()
             min_samples = self.control_panel.min_samples_spin.value()
-            self.worker.set_params(frame_aoi, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
+            self.worker.set_params(frame, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
             self.matching = True
             #self.worker.wake()  # 用 wake 觸發 worker 執行
 

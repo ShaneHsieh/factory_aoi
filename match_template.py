@@ -19,7 +19,8 @@ class cv_aoi:
         orb = cv2.ORB_create(nfeatures) 
         kp, des = orb.detectAndCompute(img, None)
         return kp, des
-        def get_fount_back_sample(self, camera_img , fount_files , back_files):
+    
+    def get_fount_back_sample(self, camera_img , fount_files , back_files):
         orb_sample = cv2.ORB_create(nfeatures=1000)
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
@@ -116,7 +117,7 @@ class cv_aoi:
 
         return all_kp, all_des
 
-    def get_diff(img1, img2, kp1, kp2, des1, des2, aoi):
+    def get_diff(self,img1, img2, kp1, kp2, des1, des2, aoi):
         # img1 is test 
         # img2 is golden
         # golden 去做仿射變換
@@ -176,7 +177,7 @@ class cv_aoi:
 
     def match_template(self,img1, goldens, aoi = None ):
 
-        kp1, des1 = self.get_keypoint(img1)
+        kp1, des1 = self.get_keypoint_grid(img1)
 
         diff = []
         image_results = []
