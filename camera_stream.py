@@ -341,11 +341,6 @@ class CameraApp(QWidget):
             print("display_image is None")
             return
         try:
-            #result = self.find_contour.detect(display_image)
-            #print(f"result['success'] = {result['success']}")
-            #if self.find_contour_result['success'] == True:
-            #    display_image = self.find_contour_result['result_image']
-            #print(f"self.result['result_image'] = {result['result_image']}")
             rgb_image = display_image.copy() if display_image is not None else np.zeros((100,100,3), dtype=np.uint8)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
@@ -483,7 +478,7 @@ class CameraApp(QWidget):
         
         for img_path in files:
             golden_img = cv2.imread(img_path)
-            kp, des = self.aoi_model.get_keypoint(golden_img)
+            kp, des = self.aoi_model.get_keypoint_grid(golden_img)
             self.goldens.append([golden_img, kp, des])
 
     def closeEvent(self, event):

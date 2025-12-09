@@ -15,12 +15,11 @@ class cv_aoi:
         mask, mask_mean, mask_min, a = self.match_template(img1, goldens, aoi = aoi)
         return mask, mask_mean, mask_min, a
     
-    def get_keypoint(self,img, nfeatures = 500):
+    def get_keypoint(self, img, nfeatures = 500):
         orb = cv2.ORB_create(nfeatures) 
         kp, des = orb.detectAndCompute(img, None)
         return kp, des
-
-    def get_fount_back_sample(self, camera_img , fount_files , back_files):
+        def get_fount_back_sample(self, camera_img , fount_files , back_files):
         orb_sample = cv2.ORB_create(nfeatures=1000)
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
@@ -84,19 +83,48 @@ class cv_aoi:
 
         result = classify_pcb_face(camera_img, front_samples, back_samples)
         return result
+    
+    def get_keypoint_grid(self, img, nfeatures=6000, grid=(4,4)):
+        h, w = img.shape[:2]
+        gh, gw = grid
+        orb = cv2.ORB_create(int(nfeatures/(gh*gw)))
 
+        all_kp = []
+        all_des = []
 
-    def get_diff(self, img1, img2, kp1, kp2, des1, des2, aoi):
-        index_params= dict( algorithm = 6,
-                            table_number = 6, # 12
-                            key_size = 12,     # 20
-                            multi_probe_level = 2) #2
-        
-        search_params = dict(checks = 100)
-        
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
-        
-        matches = flann.knnMatch(des2, des1, k=2)
+        for r in range(gh):
+            for c in range(gw):
+                y1 = int(r * h / gh)
+                y2 = int((r+1) * h / gh)
+                x1 = int(c * w / gw)
+                x2 = int((c+1) * w / gw)
+
+                tile = img[y1:y2, x1:x2]
+                kp, des = orb.detectAndCompute(tile, None)
+                if kp is not None:
+                    # 把座標從區塊位置轉回全圖座標
+                    for k in kp:
+                        k.pt = (k.pt[0] + x1, k.pt[1] + y1)
+                    all_kp.extend(kp)
+                    if des is not None:
+                        all_des.append(des)
+
+        if len(all_des) > 0:
+            all_des = np.vstack(all_des)
+        else:
+            all_des = None
+
+        return all_kp, all_des
+
+    def get_diff(img1, img2, kp1, kp2, des1, des2, aoi):
+        # img1 is test 
+        # img2 is golden
+        # golden 去做仿射變換
+        # 去找 golden 在 test 的位置
+        # 最後去看 diff 差異
+    
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        matches = bf.knnMatch(des2, des1, k=2)
         
         good = []
         for m in matches:
@@ -106,21 +134,21 @@ class cv_aoi:
                     #print(m.distance,n.distance)
                     good.append(m)
         #print(len(good))
-
         MIN_MATCH_COUNT = 10
-
         c = img2.copy()
-        if c.shape != img1.shape:
-            if aoi is not None:
-                c = c[aoi[0]:aoi[1], aoi[2]:aoi[3]]
-            else:
-                c = cv2.warpPerspective(c, np.eye(3), img1.shape[:2][::-1])
-        
+
+        golden_crop = round(aoi[0]/2), round(aoi[1] + (c.shape[0] - aoi[1]) / 2), round(aoi[2] / 2), round(aoi[3] + (c.shape[1] - aoi[3]) / 2)
+
+        #if c.shape != img1.shape:
+        if aoi is not None:
+            c = c[ golden_crop[0] : golden_crop[1], golden_crop[2] : golden_crop[3]]
+        else:
+            c = cv2.warpPerspective(c, np.eye(3), img1.shape[:2][::-1])
+
         if len(good)>MIN_MATCH_COUNT:
             try:
                 src_pts = np.float32([ kp2[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
                 dst_pts = np.float32([ kp1[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
-
                 M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 4.0)
                 if M is None:
                     print("M is None")
@@ -130,7 +158,10 @@ class cv_aoi:
         else:
             a = c
 
-        b = img1.copy()        
+        b = img1.copy()[ aoi[0]:aoi[1], aoi[2]:aoi[3] ]
+        a = a[ aoi[0]:aoi[1], aoi[2]:aoi[3] ]
+        c = c[ aoi[0] - golden_crop[0] : aoi[1] - golden_crop[1] , aoi[2] - golden_crop[2] : aoi[3] - golden_crop[3] ]
+
         a = (a-a.mean())*b.std()/a.std()+b.mean()
         c = (c-c.mean())*b.std()/c.std()+b.mean()
 
@@ -138,16 +169,17 @@ class cv_aoi:
         diff_c = np.abs(c-b).sum(-1)
 
         if diff_a.sum()<diff_c.sum():
-            return diff_a
+            return diff_a , b
         else:
             #print('no transform')
-            return diff_c
+            return diff_c , b
 
     def match_template(self,img1, goldens, aoi = None ):
 
         kp1, des1 = self.get_keypoint(img1)
 
         diff = []
+        image_results = []
 
         with ThreadPoolExecutor(max_workers=len(goldens)) as executor:
             future_to_diff = []
@@ -157,14 +189,16 @@ class cv_aoi:
                 future_to_diff.append(future)
 
             for future in as_completed(future_to_diff):
-                diff.append(future.result())
+                future_data = future.result()
+                diff.append(future_data[0])
+                image_results.append(future_data[1])
                 del future
 
             del future_to_diff 
 
         index = np.argmin(np.sum(diff, axis=(1,2)))
 
-        return diff[index], np.mean(diff, axis=0), np.min(diff, axis=0), img1 , index
+        return diff[index], np.mean(diff, axis=0), np.min(diff, axis=0), image_results[index] , index
 
     def post_proc(self,mask,  threshold = 25, n_erode = 1, n_dilate = 1):
         kernel = np.ones((3,3), np.uint8)
