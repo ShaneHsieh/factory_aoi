@@ -9,28 +9,45 @@ class LT300HControl(SerialDevice):
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
         super().__init__(port, baudrate, timeout)
         self.open()
+        if self.ser is None:
+            print("RS232 連接有誤")
+            QMessageBox.warning(self, "RS232 沒有接上", "無法控制攝影機")
+            sys.exit(1)
         self.start_reading()
         self.set_move_speed(100)
         #self.get_current_position()#100.001,100.002,0.000
         time.sleep(0.5)  # 等待回應
         self.limit_x = np.array([0, 300])
         self.limit_y = np.array([0, 300])
-        self.limit_z = np.array([0, 100])
-        self.cur_x = 0
-        self.cur_y = 0
-        self.cur_z = 75
+        self.limit_z = np.array([0, 300])
         
-        # 新增：位置確認相關
-        self.target_x = 0
-        self.target_y = 0
-        self.target_z = 75
         self._arrive_callback = None  # 回調函數
         self._callback_context = None  # 回調上下文參數
         self._checking = False
         self._check_thread = None
-        
-        self.move_to(0, 0 ,75)
     
+    def set_start_position(self, x, y, z):
+        self.start_x = x
+        self.start_y = y
+        self.start_z = z
+        self.cur_x = self.start_x
+        self.cur_y = self.start_y
+        self.cur_z = self.start_z
+        self.target_x = self.start_x
+        self.target_y = self.start_y
+        self.target_z = self.start_z
+
+        self.limit_x = np.array([x, 300])
+        self.limit_y = np.array([y, 300])
+        self.limit_z = np.array([z, 300])
+
+        self.move_to(self.start_x, self.start_y, self.start_z)
+
+    def set_max_limit_position(self, x, y, z):
+        self.limit_x[1] = x
+        self.limit_y[1] = y
+        self.limit_z[1] = z
+
     def clamp(self, value, limit):
         """自動修正到極限範圍內"""
         return float(np.clip(value, limit[0], limit[1]))
@@ -94,7 +111,6 @@ class LT300HControl(SerialDevice):
             print("⚠️ 超時：未在指定時間內到達目標位置")
             self._checking = False
     
-    
     def set_move_speed(self, speed: int):
         command = f"H\r\nSP {speed}\r\nEND\r\n"
         self.write(command)
@@ -112,6 +128,13 @@ class LT300HControl(SerialDevice):
             except Exception as e:
                 print(f"⚠️ 解析位置資料失敗: {e}")
 
+    def check_current_position(self, x , y, z):
+        self.get_current_position()
+        if (abs(self.cur_x - x) < 0.01 and 
+            abs(self.cur_y - y) < 0.01 and 
+            abs(self.cur_z - z) < 0.01):
+            return True
+        return False
 
 if __name__ == "__main__":
     dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
