@@ -17,24 +17,28 @@ class FindContour:
         self.blur_kernel_size = blur_kernel_size
         self.canny_low = canny_low
         self.canny_high = canny_high
+
+    def _box_to_rect2(self, box, frame_shape):
+        """
+        將 box (4 頂點) 轉換為 [top, bottom, left, right]，並裁切到影像邊界
+        box: numpy array shape (4,2) 各點為 (x,y)
+        frame_shape: frame.shape (h, w, ...)
+        返回整數列表 [top, bottom, left, right]
+        """
+        h, w = int(frame_shape[0]), int(frame_shape[1])
+        # 確保為整數陣列
+        xs = box[:, 0].astype(int)
+        ys = box[:, 1].astype(int)
+        top = max(0, int(np.min(ys)))
+        bottom = min(h - 1, int(np.max(ys)))
+        left = max(0, int(np.min(xs)))
+        right = min(w - 1, int(np.max(xs)))
+        return [top, bottom, left, right]
     
     def detect(self, frame, draw_result=False, draw_color=(0, 255, 0), draw_thickness=2):
         """
         檢測 frame 中的最大輪廓並計算最小外接矩形
-        
-        Args:
-            frame: 輸入的圖像 frame (numpy array, BGR 格式)
-            draw_result: 是否在結果圖像上繪製邊界框，預設為 False
-            draw_color: 繪製邊界框的顏色 (B, G, R)，預設為綠色 (0, 255, 0)
-            draw_thickness: 繪製邊界框的線條粗細，預設為 2
-        
-        Returns:
-            dict: 包含以下鍵值的字典
-                - 'contour': 最大輪廓 (numpy array)
-                - 'box': 最小外接矩形的四個頂點座標 (numpy array, shape: (4, 2))
-                - 'rect': 最小外接矩形的資訊 ((中心x, 中心y), (寬, 高), 旋轉角度)
-                - 'result_image': 繪製結果的圖像 (如果 draw_result=True，否則為 None)
-                - 'success': 是否成功檢測到輪廓 (bool)
+        返回包含 'rect2' = [top, bottom, left, right]
         """
         if frame is None:
             return {
@@ -42,7 +46,8 @@ class FindContour:
                 'box': None,
                 'rect': None,
                 'result_image': None,
-                'success': False
+                'success': False,
+                'rect2': None
             }
         
         # 1. Gray + blur
@@ -61,7 +66,8 @@ class FindContour:
                 'box': None,
                 'rect': None,
                 'result_image': frame.copy() if draw_result else None,
-                'success': False
+                'success': False,
+                'rect2': None
             }
         
         # 找到面積最大的輪廓
@@ -71,7 +77,9 @@ class FindContour:
         rect = cv2.minAreaRect(cnt)
         box = cv2.boxPoints(rect)
         box = np.int32(box)
-        
+        # rect2: [top, bottom, left, right] 並裁切到影像邊界
+        rect2 = self._box_to_rect2(box, frame.shape)
+
         # 繪製結果
         result_image = None
         if draw_result:
@@ -82,6 +90,97 @@ class FindContour:
             'contour': cnt,
             'box': box,
             'rect': rect,
+            'rect2': rect2,
+            'result_image': result_image,
+            'success': True
+        }
+    
+    def detect_by_color(self, frame, target_color, color_tolerance=30, draw_result=False, draw_color=(0, 255, 0), draw_thickness=2):
+        """
+        根據指定的顏色檢測區域並計算最小外接矩形
+        返回會包含 'rect2' = [top, bottom, left, right]
+        """
+        if frame is None:
+            return {
+                'mask': None,
+                'contour': None,
+                'box': None,
+                'rect': None,
+                'rect2': None,
+                'result_image': None,
+                'success': False
+            }
+        
+        # 轉換為 HSV 色彩空間（更適合顏色檢測）
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # 將 BGR 轉換為 HSV 以便設定範圍
+        target_color_bgr = np.uint8([[[target_color[0], target_color[1], target_color[2]]]])
+        target_color_hsv = cv2.cvtColor(target_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
+        
+        # 設定顏色範圍（考慮誤差）
+        h, s, v = target_color_hsv
+        
+        # 由於 H 是循環的 (0-180)，需要特殊處理
+        h_tolerance = int(color_tolerance / 2)
+        s_tolerance = int(color_tolerance * 1.2)
+        v_tolerance = int(color_tolerance * 1.2)
+
+        lower_bound = np.array([
+            max(0, int(h) - h_tolerance),
+            max(0, int(s) - s_tolerance),
+            max(0, int(v) - v_tolerance)
+        ], dtype=np.uint8)
+        upper_bound = np.array([
+            min(180, int(h) + h_tolerance),
+            min(255, int(s) + s_tolerance),
+            min(255, int(v) + v_tolerance)
+        ], dtype=np.uint8)
+        
+        # 創建遮罩
+        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        
+        # 形態學操作：去除雜訊
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # 尋找輪廓
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if len(contours) == 0:
+            return {
+                'mask': mask,
+                'contour': None,
+                'box': None,
+                'rect': None,
+                'rect2': None,
+                'result_image': frame.copy() if draw_result else None,
+                'success': False
+            }
+        
+        # 找到面積最大的輪廓
+        cnt = max(contours, key=cv2.contourArea)
+        
+        # 計算最小外接矩形
+        rect = cv2.minAreaRect(cnt)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+        # rect2: [top, bottom, left, right]，並剪裁到影像邊界
+        rect2 = self._box_to_rect2(box, frame.shape)
+
+        # 繪製結果
+        result_image = None
+        if draw_result:
+            result_image = frame.copy()
+            cv2.drawContours(result_image, [box], 0, draw_color, draw_thickness)
+        
+        return {
+            'mask': mask,
+            'contour': cnt,
+            'box': box,
+            'rect': rect,
+            'rect2': rect2,
             'result_image': result_image,
             'success': True
         }

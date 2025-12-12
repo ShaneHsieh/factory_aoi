@@ -340,7 +340,11 @@ class CameraApp(QWidget):
         if display_image is None:
             print("display_image is None")
             return
-        try:
+        try: 
+            #self.find_contour_result  = self.find_contour.detect_by_color(display_image.copy(), target_color=(100, 200, 100), color_tolerance=100, draw_result=True)    
+            #display_frame2 = self.find_contour_result['result_image'] if self.find_contour_result['result_image'] is not None else display_frame.copy()
+            #if self.find_contour_result['success']:
+            #    box = self.find_contour_result['box']
             rgb_image = display_image.copy() if display_image is not None else np.zeros((100,100,3), dtype=np.uint8)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
@@ -387,16 +391,22 @@ class CameraApp(QWidget):
             self.last_frame = self.snapshot_path(self.current_frame , save_dir)
 
             self.display_video = False
-            if self.aoi_rect:
-                t, b, l, r = self.aoi_rect
-                frame_aoi = frame[t:b, l:r]
-            else:
-                frame_aoi = frame
+            
             threshold = self.control_panel.threshold_spin.value()
             n_erode = self.control_panel.erode_spin.value()
             n_dilate = self.control_panel.dilate_spin.value()
             min_samples = self.control_panel.min_samples_spin.value()
             self.worker.set_params(frame, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
+            self.find_contour_result  = self.find_contour.detect_by_color(frame, target_color=(100, 200, 100), color_tolerance=100, draw_result=True)    
+            #display_frame2 = self.find_contour_result['result_image'] if self.find_contour_result['result_image'] is not None else display_frame.copy()
+            if self.find_contour_result['success']:
+                self.aoi_rect = self.find_contour_result['rect2']
+                print("aoi_rect =", self.aoi_rect)
+            else:
+                print("no contour found")
+                self.aoi_rect = [21 , 2160 - 21 , 38 , 3840 -38 ]
+
+
             self.matching = True
             #self.worker.wake()  # 用 wake 觸發 worker 執行
 

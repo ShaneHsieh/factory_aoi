@@ -105,7 +105,7 @@ class LT300HControl(SerialDevice):
                     self._arrive_callback(self._callback_context)
                 break
             
-            time.sleep(0.5)
+            time.sleep(0.1)
         
         if self._checking:
             print("⚠️ 超時：未在指定時間內到達目標位置")

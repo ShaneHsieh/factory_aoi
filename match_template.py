@@ -62,22 +62,23 @@ class cv_aoi:
             avg_back = np.mean(back_scores)
 
             # 檢查是否為有效值（非 NaN）
-            front_valid = not np.isnan(avg_front) and avg_front > 2
-            back_valid = not np.isnan(avg_back) and avg_back > 2
+            #front_valid = not np.isnan(avg_front) and avg_front > 2
+            #back_valid = not np.isnan(avg_back) and avg_back > 2
 
             print(f"avg_front {avg_front} , avg_back {avg_back} avg_front > avg_back {(not np.isnan(avg_front) and not np.isnan(avg_back)) and (avg_front > avg_back)}")
 
-            if front_valid and back_valid:
-                if avg_front > avg_back:
-                    return 0
-                else:
-                    return 1
-            elif front_valid:
-                return 0
-            elif back_valid:
-                return 1
-            else:
+            if np.isnan(avg_back) and np.isnan(avg_front):
                 return -1
+            elif np.isnan(avg_back) and any(x > 4 for x in front_scores):
+                print("front_scores = " , front_scores)
+                return 0
+            elif np.isnan(avg_front) and any(x > 4 for x in back_scores):
+                return 1
+            elif avg_front > avg_back:
+                return 0
+            else:
+                return 1
+            
 
         front_samples = [cv2.imread(f) for f in fount_files]
         back_samples = [cv2.imread(f) for f in back_files]
