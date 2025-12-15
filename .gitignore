@@ -1,6 +1,7 @@
 __pycache__
 .ipynb_checkpoints
 *.bmp
+*.ini
 templates
 *copy*
 Shane

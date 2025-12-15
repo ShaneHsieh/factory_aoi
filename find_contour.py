@@ -95,10 +95,10 @@ class FindContour:
             'success': True
         }
     
-    def detect_by_color(self, frame, target_color, color_tolerance=30, draw_result=False, draw_color=(0, 255, 0), draw_thickness=2):
+    def detect_by_color(self, frame, lower_bound , upper_bound , draw_result=False, draw_color=(0, 255, 0), draw_thickness=2, merge_all=True):
         """
         根據指定的顏色檢測區域並計算最小外接矩形
-        返回會包含 'rect2' = [top, bottom, left, right]
+        merge_all: 若為 True，會將所有區域合併成一個大 box（忽略中間縫隙）
         """
         if frame is None:
             return {
@@ -114,34 +114,14 @@ class FindContour:
         # 轉換為 HSV 色彩空間（更適合顏色檢測）
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # 將 BGR 轉換為 HSV 以便設定範圍
-        target_color_bgr = np.uint8([[[target_color[0], target_color[1], target_color[2]]]])
-        target_color_hsv = cv2.cvtColor(target_color_bgr, cv2.COLOR_BGR2HSV)[0][0]
-        
-        # 設定顏色範圍（考慮誤差）
-        h, s, v = target_color_hsv
-        
-        # 由於 H 是循環的 (0-180)，需要特殊處理
-        h_tolerance = int(color_tolerance / 2)
-        s_tolerance = int(color_tolerance * 1.2)
-        v_tolerance = int(color_tolerance * 1.2)
+        lower_bound = np.array(lower_bound, dtype=np.uint8)
+        upper_bound = np.array(upper_bound, dtype=np.uint8)
 
-        lower_bound = np.array([
-            max(0, int(h) - h_tolerance),
-            max(0, int(s) - s_tolerance),
-            max(0, int(v) - v_tolerance)
-        ], dtype=np.uint8)
-        upper_bound = np.array([
-            min(180, int(h) + h_tolerance),
-            min(255, int(s) + s_tolerance),
-            min(255, int(v) + v_tolerance)
-        ], dtype=np.uint8)
-        
         # 創建遮罩
         mask = cv2.inRange(hsv, lower_bound, upper_bound)
         
         # 形態學操作：去除雜訊
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (10, 10))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
@@ -158,16 +138,21 @@ class FindContour:
                 'result_image': frame.copy() if draw_result else None,
                 'success': False
             }
-        
-        # 找到面積最大的輪廓
-        cnt = max(contours, key=cv2.contourArea)
-        
-        # 計算最小外接矩形
-        rect = cv2.minAreaRect(cnt)
-        box = cv2.boxPoints(rect)
-        box = np.int32(box)
-        # rect2: [top, bottom, left, right]，並剪裁到影像邊界
-        rect2 = self._box_to_rect2(box, frame.shape)
+        # 合併所有輪廓點
+        if merge_all and len(contours) > 1:
+            all_points = np.vstack(contours)
+            rect = cv2.minAreaRect(all_points)
+            box = cv2.boxPoints(rect)
+            box = np.int32(box)
+            rect2 = self._box_to_rect2(box, frame.shape)
+            cnt = all_points
+        else:
+            # 找到面積最大的輪廓
+            cnt = max(contours, key=cv2.contourArea)
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            box = np.int32(box)
+            rect2 = self._box_to_rect2(box, frame.shape)
 
         # 繪製結果
         result_image = None

@@ -5,6 +5,7 @@ import time
 import numpy as np
 import shutil
 import threading
+import configparser
 
 from match_template import cv_aoi
 from control_panel import ControlPanel
@@ -19,9 +20,17 @@ from PyQt5.QtCore import QTimer, pyqtSignal, pyqtSlot, QPoint, Qt, QObject, QThr
 from PyQt5.QtWidgets import QMessageBox
 from pygrabber.dshow_graph import FilterGraph
 
-def get_bmp_file(folder_path):
+def get_file(folder_path, extension='.bmp'):
     if os.path.isdir(folder_path):
-        return [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and f.lower().endswith('.bmp')]
+        # 支援單個副檔名（字串）或多個副檔名（列表/元組）
+        extensions = extension if isinstance(extension, (list, tuple)) else [extension]
+        
+        # 確保所有副檔名都以 . 開頭
+        extensions = [ext if ext.startswith('.') else '.' + ext for ext in extensions]
+        extensions = [ext.lower() for ext in extensions]
+        
+        return [os.path.join(folder_path, f) for f in os.listdir(folder_path) 
+                if os.path.isfile(os.path.join(folder_path, f)) and any(f.lower().endswith(ext) for ext in extensions)]
     else:
         return []
 
@@ -232,6 +241,8 @@ class CameraMoveWorker(QObject):
                     os.makedirs(folder, exist_ok=True)
                     try:
                         self.camera_app.snapshot_path(frame_copy, folder, message=False)
+                        # 檢測並保存 aoi_rect 到 config.ini
+                        self.camera_app.detect_and_save_aoi_rect(frame_copy, folder)
                     except Exception as e:
                         print(f"snapshot save error: {e}")
 
@@ -341,10 +352,6 @@ class CameraApp(QWidget):
             print("display_image is None")
             return
         try: 
-            #self.find_contour_result  = self.find_contour.detect_by_color(display_image.copy(), target_color=(100, 200, 100), color_tolerance=100, draw_result=True)    
-            #display_frame2 = self.find_contour_result['result_image'] if self.find_contour_result['result_image'] is not None else display_frame.copy()
-            #if self.find_contour_result['success']:
-            #    box = self.find_contour_result['box']
             rgb_image = display_image.copy() if display_image is not None else np.zeros((100,100,3), dtype=np.uint8)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
@@ -397,18 +404,7 @@ class CameraApp(QWidget):
             n_dilate = self.control_panel.dilate_spin.value()
             min_samples = self.control_panel.min_samples_spin.value()
             self.worker.set_params(frame, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
-            self.find_contour_result  = self.find_contour.detect_by_color(frame, target_color=(100, 200, 100), color_tolerance=100, draw_result=True)    
-            #display_frame2 = self.find_contour_result['result_image'] if self.find_contour_result['result_image'] is not None else display_frame.copy()
-            if self.find_contour_result['success']:
-                self.aoi_rect = self.find_contour_result['rect2']
-                print("aoi_rect =", self.aoi_rect)
-            else:
-                print("no contour found")
-                self.aoi_rect = [21 , 2160 - 21 , 38 , 3840 -38 ]
-
-
             self.matching = True
-            #self.worker.wake()  # 用 wake 觸發 worker 執行
 
             circle_image , n = self.worker.match()
             self.worker.match_done.emit(circle_image, n)
@@ -429,8 +425,8 @@ class CameraApp(QWidget):
             self.show_message_box("正樣資料夾錯誤", f'找不到資料夾{positive_folder}', 3000)
             return
 
-        front_samples = get_bmp_file(self.get_move_folder(positive_folder , 0))
-        back_samples = get_bmp_file(self.get_move_folder(positive_folder , 1))
+        front_samples = get_file(self.get_move_folder(positive_folder , 0), extension='.bmp')
+        back_samples = get_file(self.get_move_folder(positive_folder , 1), extension='.bmp')
 
         if len(front_samples) == 0 and len(back_samples) == 0:
             self.fount_back = 0 # not sample
@@ -463,6 +459,55 @@ class CameraApp(QWidget):
         elif self.camera_move_worker.camera_move_function == self.handle_manual_match:
             self.show_message_box("檢測完成", "PASS" , -1)
 
+    def detect_and_save_aoi_rect(self, frame, folder_path):
+        """
+        檢測並保存 AOI 矩形
+        
+        Args:
+            frame: 要檢測的影像
+            folder_path: 儲存 config.ini 的資料夾路徑
+        """
+        try:
+            self.find_contour_result = self.find_contour.detect_by_color(
+                frame, lower_bound =(40, 60, 60) , upper_bound =(80, 255, 255) , draw_result=True
+            )
+            
+            if self.find_contour_result['success']:
+                self.aoi_rect = self.find_contour_result['rect2']
+                #self.aoi_rect can not bigger than [21 , 2160 - 21 , 38 , 3840 -38 ]
+                self.aoi_rect[0] = max(21, self.aoi_rect[0] - 5)
+                self.aoi_rect[1] = min(2160 - 21, self.aoi_rect[1] + 5)
+                self.aoi_rect[2] = max(38, self.aoi_rect[2] - 5)
+                self.aoi_rect[3] = min(3840 - 38, self.aoi_rect[3] + 5)
+
+                # 保存成 config.ini 
+                config = configparser.ConfigParser()
+                
+                # 轉換 aoi_rect [top, bottom, left, right] 為 [x, y, width, height]
+                top, bottom, left, right = self.aoi_rect
+                x = left
+                y = top
+                width = right - left
+                height = bottom - top
+                
+                config.add_section('Rect')
+                config.set('Rect', 'x', str(x))
+                config.set('Rect', 'y', str(y))
+                config.set('Rect', 'width', str(width))
+                config.set('Rect', 'height', str(height))
+                
+                # 保存到 config.ini
+                os.makedirs(folder_path, exist_ok=True)
+                config_path = os.path.join(folder_path, 'config.ini')
+                with open(config_path, 'w') as f:
+                    config.write(f)
+            else:
+                print("no contour found")
+                self.aoi_rect = [21, 2160 - 21, 38, 3840 - 38]
+        except Exception as e:
+            print(f"detect_and_save_aoi_rect error: {e}")
+            self.aoi_rect = [21, 2160 - 21, 38, 3840 - 38]
+
     def set_sample(self):
         folder = self.control_panel.folder_combo.currentText()
         if not folder:
@@ -480,7 +525,7 @@ class CameraApp(QWidget):
             print(f"資料夾不存在！ folder_path = {folder_path}" )
             self.show_message_box("設定檢測樣本", "資料夾不存在！", 3000)      
             return
-        files = get_bmp_file(folder_path)
+        files = get_file(folder_path , extension='.bmp')
         if not files:
             print(f"資料夾內無BMP檔！ {folder_path}")
             self.show_message_box("設定檢測樣本", "資料夾內無BMP檔！", 3000)               
@@ -490,6 +535,24 @@ class CameraApp(QWidget):
             golden_img = cv2.imread(img_path)
             kp, des = self.aoi_model.get_keypoint_grid(golden_img)
             self.goldens.append([golden_img, kp, des])
+
+        # 嘗試讀取 ini 檔案並設定 aoi_rect
+        inifiles = get_file(folder_path , extension='.ini')
+        if inifiles:
+            try:
+                config = configparser.ConfigParser()
+                config.read(inifiles[0])
+                
+                if config.has_section('Rect'):
+                    x = int(config.get('Rect', 'x'))
+                    y = int(config.get('Rect', 'y'))
+                    width = int(config.get('Rect', 'width'))
+                    height = int(config.get('Rect', 'height'))
+                    
+                    # 轉換為 aoi_rect 格式 [top, bottom, left, right]
+                    self.aoi_rect = [y, y + height, x, x + width]
+            except Exception as e:
+                print(f"讀取 INI 檔案失敗: {e}")
 
     def closeEvent(self, event):
         self.LT_300H_dev.close()
@@ -564,8 +627,8 @@ class CameraApp(QWidget):
 
         elif event.key() == Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
             sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
-            fount_sample = get_bmp_file(self.get_move_folder(sample_path , 0))
-            back_sample = get_bmp_file(self.get_move_folder(sample_path , 1))
+            fount_sample = get_file(self.get_move_folder(sample_path , 0) , extension='.bmp')
+            back_sample = get_file(self.get_move_folder(sample_path , 1) , extension='.bmp')
             fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
             if fount_back < 0 :
                 self.show_message_box("沒有樣本", f"{sample_path} 沒有樣本", 3000)
@@ -576,8 +639,8 @@ class CameraApp(QWidget):
 
         elif event.key() == Qt.Key_D:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
             sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
-            fount_sample = get_bmp_file(self.get_move_folder(sample_path , 0))
-            back_sample = get_bmp_file(self.get_move_folder(sample_path , 1))
+            fount_sample = get_file(self.get_move_folder(sample_path , 0) , extension='.bmp')
+            back_sample = get_file(self.get_move_folder(sample_path , 1) , extension='.bmp')
             fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
             if fount_back < 0 :
                 self.show_message_box("沒有樣本", f"{sample_path} 沒有樣本", 3000)
