@@ -47,7 +47,7 @@ class ControlPanel(QWidget):
         self.erode_spin = QSpinBox()
         self.erode_spin.setFont(ui_font)
         self.erode_spin.setRange(0, 20)
-        self.erode_spin.setValue(3)
+        self.erode_spin.setValue(2)
         self.erode_spin.setPrefix("n_erode: ")
         self.dilate_spin = QSpinBox()
         self.dilate_spin.setFont(ui_font)

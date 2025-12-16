@@ -48,6 +48,11 @@ class AOILabel(QLabel):
         self.aoi_rect = None  # 移進 AOILabel
         self.video_width = 2560  # 預設值，CameraApp 會設置
         self.video_height = 1440
+        # 新增 zoom 狀態
+        self.zoom_scale = 1.0
+        self.zoom_center = None  # (x, y) in image coordinates
+        self.left = 0
+        self.top = 0
 
     def resizeEvent(self, event):
         self.label_width = self.width()   # 更新 label 寬度
@@ -58,6 +63,43 @@ class AOILabel(QLabel):
         self._pixmap = pixmap
         self.update()
 
+    def wheelEvent(self, event):
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        x, y = int(pos.x()), int(pos.y())
+        delta = event.angleDelta().y()
+        # 呼叫 zoom_at
+        self.zoom_at(x, y, delta)
+        self.update()
+        # 不呼叫 super().wheelEvent(event) 以避免父類預設行為
+
+    def zoom_at(self, x, y, delta):
+        # delta > 0 放大, < 0 縮小
+        new_scale = self.zoom_scale + 0.25 if delta > 0 else self.zoom_scale - 0.25
+        new_scale = max(1.0, min(new_scale, 20.0))  # 限制縮放範圍
+        if self._pixmap is None:
+            return
+        widget_w, widget_h = self.width(), self.height()
+        pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
+        # 目前顯示區域的左上角在原圖的座標
+        if self.zoom_scale > 1.01 and self.zoom_center is not None:
+            #None
+            #zx, zy = self.zoom_center
+            crop_w = int(pixmap_w / self.zoom_scale)
+            crop_h = int(pixmap_h / self.zoom_scale)
+            #self.left = max(0, zx - crop_w // 2)
+            #self.top = max(0, zy - crop_h // 2)
+        else:
+            self.left, self.top = 0, 0
+            crop_w, crop_h = pixmap_w, pixmap_h
+        # 滑鼠在 widget 的比例座標
+        rel_x = x / widget_w
+        rel_y = y / widget_h
+        # 新的 zoom_center 以目前顯示區域為基準
+        img_x = int(self.left + rel_x * crop_w)
+        img_y = int(self.top + rel_y * crop_h)
+        self.zoom_scale = new_scale
+        self.zoom_center = (img_x, img_y)
+
     def paintEvent(self, event):
         from PyQt5.QtWidgets import QStyle
         from PyQt5.QtCore import Qt
@@ -67,11 +109,25 @@ class AOILabel(QLabel):
         if self._pixmap:
             widget_w, widget_h = self.width(), self.height()
             pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-            scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
-            new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
-            x = (widget_w - new_w) // 2
-            y = (widget_h - new_h) // 2
-            scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # zoom 狀態
+            if self.zoom_scale > 1.01 and self.zoom_center is not None:
+                zx, zy = self.zoom_center
+
+                # 維持原圖比例裁切
+                crop_w = int(pixmap_w / self.zoom_scale)
+                crop_h = int(pixmap_h / self.zoom_scale)
+                self.left = max(0, zx - crop_w // 2)
+                right = min(pixmap_w, self.left + crop_w)
+                self.top = max(0, zy - crop_h // 2)
+                bottom = min(pixmap_h, self.top + crop_h)
+                cropped = self._pixmap.copy(self.left, self.top, right - self.left, bottom - self.top)
+                scaled_pixmap = cropped.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            else:
+                scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
+                new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
+                scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = (widget_w - scaled_pixmap.width()) // 2
+            y = (widget_h - scaled_pixmap.height()) // 2
             painter.drawPixmap(x, y, scaled_pixmap)
         # 不要呼叫 super().paintEvent(event)，避免 QLabel 預設繪圖覆蓋
 
@@ -103,7 +159,7 @@ class AOILabel(QLabel):
         self.aoi_rect_changed.emit(self.aoi_rect)
 
 class AOIMatchWorker(QObject):
-    match_done = pyqtSignal(object, int)  # 改用 match_done signal
+    match_done = pyqtSignal(object)  # 改用 match_done signal
     def __init__(self, aoi_model):
         super().__init__()
         self.aoi_model = aoi_model
@@ -114,11 +170,12 @@ class AOIMatchWorker(QObject):
         self.n_erode = None
         self.n_dilate = None
         self.min_samples = None
+        self.circle_image = None
         # 新增：QWaitCondition 與 QMutex
-        self._wait_cond = QWaitCondition()
-        self._mutex = QMutex()
-        self._should_run = False
-        self._running = True  # 控制 while 迴圈
+        # self._wait_cond = QWaitCondition()
+        # self._mutex = QMutex()
+        # self._should_run = False
+        # self._running = True  # 控制 while 迴圈
 
     def set_params(self, frame, goldens, aoi, threshold, n_erode, n_dilate, min_samples):
         self.frame = frame
@@ -128,31 +185,33 @@ class AOIMatchWorker(QObject):
         self.n_erode = n_erode
         self.n_dilate = n_dilate
         self.min_samples = min_samples
+        self.circle_image = None
 
-    def run(self):
-        while self._running:
-            self._mutex.lock()
-            if not self._should_run:
-                self._wait_cond.wait(self._mutex)
-            self._should_run = False
-            self._mutex.unlock()
-            if not self._running:
-                break
-            circle_image , n = self.match()     
-            self.match_done.emit(circle_image, n)
+    # def run(self):
+    #     None
+        # while self._running:
+        #     self._mutex.lock()
+        #     if not self._should_run:
+        #         self._wait_cond.wait(self._mutex)
+        #     self._should_run = False
+        #     self._mutex.unlock()
+        #     if not self._running:
+        #         break
+        #     circle_image , n = self.match()     
+        #     self.match_done.emit(circle_image, n)
 
-    def wake(self):
-        self._mutex.lock()
-        self._should_run = True
-        self._wait_cond.wakeOne()
-        self._mutex.unlock()
+    # def wake(self):
+    #     self._mutex.lock()
+    #     self._should_run = True
+    #     self._wait_cond.wakeOne()
+    #     self._mutex.unlock()
 
-    def stop(self):
-        self._mutex.lock()
-        self._running = False
-        self._should_run = True
-        self._wait_cond.wakeOne()
-        self._mutex.unlock()
+    # def stop(self):
+    #     self._mutex.lock()
+    #     self._running = False
+    #     self._should_run = True
+    #     self._wait_cond.wakeOne()
+    #     self._mutex.unlock()
 
     def match(self):
         if self.frame is None or self.goldens is None:
@@ -160,10 +219,10 @@ class AOIMatchWorker(QObject):
         
         start_time = time.time()
         mask, mask_mean, mask_min, a , index= self.aoi_model.match_template(self.frame, self.goldens, aoi=self.aoi)
-        circle_image , n  = self.match_result(mask_min, a)
+        self.circle_image , n  = self.match_result(mask_min, a)
         end_time = time.time()
         print(f"frame = {self.frame.shape} time = {end_time - start_time}  , index = {index} , n = {n}")
-        return circle_image , n
+        return self.circle_image , n
 
     def match_result(self, mask_min, a):
         m = self.aoi_model.post_proc(mask_min, self.threshold, self.n_erode, self.n_dilate)
@@ -327,7 +386,7 @@ class CameraApp(QWidget):
         self.worker = AOIMatchWorker(self.aoi_model)
         self.worker.moveToThread(self.match_thread)
         self.worker.match_done.connect(self.show_image)
-        self.match_thread.started.connect(self.worker.run)
+        #self.match_thread.started.connect(self.worker.run)
         self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
         
         # 新增：snapshot positive worker
@@ -347,7 +406,7 @@ class CameraApp(QWidget):
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
 
-    def show_image(self, display_image , circle_count):
+    def show_image(self, display_image):
         if display_image is None:
             print("display_image is None")
             return
@@ -357,11 +416,9 @@ class CameraApp(QWidget):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
             self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-            # self.n_label.setText(f"圈數: {circle_count}")  # 新增：顯示圈數
             self.matching = False
         except:
             print("show_image crash")
-            # self.n_label.setText("")  # 若失敗則清空
             self.matching = False
 
     def update_frame(self):
@@ -375,7 +432,7 @@ class CameraApp(QWidget):
                 if self.aoi_rect:
                     t, b, l, r = self.aoi_rect
                     cv2.rectangle(display_frame, (l, t), (r, b), (0, 0, 255), 4)
-                self.show_image(display_frame, -1) 
+                self.show_image(display_frame) 
 
     def snapshot_path(self, frame, path , message=False):
         if not os.path.isdir(path):
@@ -407,7 +464,7 @@ class CameraApp(QWidget):
             self.matching = True
 
             circle_image , n = self.worker.match()
-            self.worker.match_done.emit(circle_image, n)
+            self.worker.match_done.emit(circle_image)
             if n > 0 or n == -1:
                 self.camera_move_worker.breakpoint = True
                 self.message_box.emit("檢測瑕疵", f"有瑕疵: {n} 個", -1)
@@ -566,7 +623,6 @@ class CameraApp(QWidget):
             self.snapshot_thread.wait()
         # 清理 match worker
         if self.match_thread is not None and self.match_thread.isRunning():
-            self.worker.stop()  # 通知 worker 結束 while 迴圈
             self.match_thread.quit()
             self.match_thread.wait()
         event.accept()
@@ -637,7 +693,7 @@ class CameraApp(QWidget):
             self.camera_move_worker.camera_move_function = self.handle_manual_match
             self.camera_move_worker.wake()
 
-        elif event.key() == Qt.Key_D:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
+        elif event.key() == Qt.Key_D:  # 移動並觸發手動圈數計算
             sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
             fount_sample = get_file(self.get_move_folder(sample_path , 0) , extension='.bmp')
             back_sample = get_file(self.get_move_folder(sample_path , 1) , extension='.bmp')
@@ -647,7 +703,7 @@ class CameraApp(QWidget):
                 return
             self.fount_back = fount_back
             self.handle_manual_match()
-            self.worker.wake()
+            #self.worker.wake()
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
@@ -676,6 +732,13 @@ class CameraApp(QWidget):
             folder = f"已保存未檢測到瑕疵圖片 {new_path}"
             self.show_message_box("未檢測到", folder, 3000)
         
+        elif event.key() == Qt.Key_V:  # V for show camera video or AOI result
+            if self.display_video == False:
+                self.display_video = True
+            else:
+                self.display_video = False
+                time.sleep(0.1)
+                self.show_image(self.worker.circle_image)
         else:
             super().keyPressEvent(event)
 
