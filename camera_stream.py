@@ -159,62 +159,133 @@ class AOILabel(QLabel):
         self.aoi_rect_changed.emit(self.aoi_rect)
 
 class AOIMatchWorker(QObject):
-    match_done = pyqtSignal(object)  # 改用 match_done signal
+    match_done = pyqtSignal(object)
+    message_box = pyqtSignal(str, str, int)
     def __init__(self, aoi_model):
         super().__init__()
         self.aoi_model = aoi_model
-        self.frame = None
-        self.goldens = None
-        self.aoi = None
+
+        self.aoi_rect = None
         self.threshold = None
         self.n_erode = None
         self.n_dilate = None
         self.min_samples = None
         self.circle_image = None
         # 新增：QWaitCondition 與 QMutex
-        # self._wait_cond = QWaitCondition()
-        # self._mutex = QMutex()
-        # self._should_run = False
-        # self._running = True  # 控制 while 迴圈
+        self._wait_cond = QWaitCondition()
+        self._mutex = QMutex()
+        self._should_run = False
+        self._running = True  # 控制 while 迴圈
 
-    def set_params(self, frame, goldens, aoi, threshold, n_erode, n_dilate, min_samples):
-        self.frame = frame
-        self.goldens = goldens
-        self.aoi = aoi
+        #self.frame = None
+        self.detect_frame = []
+        self.goldens = []
+        self.detect_result = []
+        self.detect_index = 0 
+        self.detect_max_index = 4
+
+    def set_params(self, threshold, n_erode, n_dilate, min_samples):
         self.threshold = threshold
         self.n_erode = n_erode
         self.n_dilate = n_dilate
         self.min_samples = min_samples
         self.circle_image = None
+        return True
+    
+    def set_frame(self, frame):
+        self.detect_frame.append(frame.copy())
+    
+    def set_frame_and_goldens(self, frame ,folder_path):
+        self.detect_frame.append(frame.copy())
+        self.goldens , self.aoi_rect = self.set_goldens_sample(folder_path)
+        if self.goldens is None or self.aoi_rect is None:
+            return False
+        return True
 
-    # def run(self):
-    #     None
-        # while self._running:
-        #     self._mutex.lock()
-        #     if not self._should_run:
-        #         self._wait_cond.wait(self._mutex)
-        #     self._should_run = False
-        #     self._mutex.unlock()
-        #     if not self._running:
-        #         break
-        #     circle_image , n = self.match()     
-        #     self.match_done.emit(circle_image, n)
+    def set_goldens_sample(self , folder_path):
+        #folder_path = self.control_panel.folder_combo.currentText()
+        #if not folder_path:
+        #    QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
+        #    return
+        #folder_path = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back)
+        goldens = []
+        if not os.path.isdir(folder_path):            
+            self.message_box.emit("設定檢測樣本", "資料夾不存在！", 3000)      
+            return
+        files = get_file(folder_path , extension='.bmp')
+        if not files:
+            self.message_box.emit("設定檢測樣本", "資料夾內無BMP檔！", 3000)               
+            return
+        
+        for img_path in files:
+            golden_img = cv2.imread(img_path)
+            kp, des = self.aoi_model.get_keypoint_grid(golden_img)
+            self.goldens.append([golden_img, kp, des])
 
-    # def wake(self):
-    #     self._mutex.lock()
-    #     self._should_run = True
-    #     self._wait_cond.wakeOne()
-    #     self._mutex.unlock()
+        # 嘗試讀取 ini 檔案並設定 aoi_rect
+        aoi_rect = None
+        inifiles = get_file(folder_path , extension='.ini')
+        if inifiles:
+            try:
+                config = configparser.ConfigParser()
+                config.read(inifiles[0])
+                
+                if config.has_section('Rect'):
+                    x = int(config.get('Rect', 'x'))
+                    y = int(config.get('Rect', 'y'))
+                    width = int(config.get('Rect', 'width'))
+                    height = int(config.get('Rect', 'height'))
+                    
+                    aoi_rect = [y, y + height, x, x + width]
+            except Exception as e:
+                self.message_box.emit("設定檢測樣本", "沒有 .ini 檔！", 3000)               
+                return
 
-    # def stop(self):
-    #     self._mutex.lock()
-    #     self._running = False
-    #     self._should_run = True
-    #     self._wait_cond.wakeOne()
-    #     self._mutex.unlock()
+        return goldens , aoi_rect
 
-    def match(self):
-        if self.frame is None or self.goldens is None:
+    def run(self):
+        while self._running:
+            self._mutex.lock()
+            #if not self._should_run:
+            self._wait_cond.wait(self._mutex)
+            #self._should_run = False
+            self._mutex.unlock()
+            if not self._running:
+                break
+            circle_image , n = self.match()     
+            self.match_done.emit(circle_image, n)
+
+    def wake(self):
+        #self._mutex.lock()
+        #self._should_run = True
+        self._wait_cond.wakeOne()
+        #self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._should_run = True
+        self._wait_cond.wakeOne()
+        self._mutex.unlock()
+
+    def match(self , index = -1):
+        frame = None
+        if index == -1:
+            while self.detect_index != self.detect_max_index:
+                if len(self.detect_frame) == 0:
+                    time.sleep(0.1)
+                    continue
+                frame = self.detect_frame[self.detect_index]
+                
+                print(f"AOIMatchWorker match frame index = {self.detect_index} / {self.detect_max_index}")
+                break
+        else:
+            if len(self.detect_frame) > index:
+                frame = self.detect_frame[index]
+            else:
+                return None , 0
+        
+        if frame is None or self.goldens[self.detect_index] is None:
             return None
         
         start_time = time.time()
@@ -222,6 +293,13 @@ class AOIMatchWorker(QObject):
         self.circle_image , n  = self.match_result(mask_min, a)
         end_time = time.time()
         print(f"frame = {self.frame.shape} time = {end_time - start_time}  , index = {index} , n = {n}")
+
+        if index == -1:
+            self.detect_index += 1
+            self.detect_result.append((self.circle_image , n))
+        else:
+            self.detect_result[index] = (self.circle_image , n)
+
         return self.circle_image , n
 
     def match_result(self, mask_min, a):
@@ -234,6 +312,16 @@ class CameraMoveWorker(QObject):
     camera_move_done = pyqtSignal()  # 拍照完成訊號
     def __init__(self, camera_app):
         super().__init__()
+
+        self.LT_300H_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+        self.LT_300H_dev.set_start_position(35, 48, 21)
+        self.LT_300H_dev.set_max_limit_position(150, 110, 300)
+
+        # x 方向：1 表示向右 (0->200)，-1 表示向左 (200->0)
+        self._x_dir = 1
+        self.step_x = 90
+        self.step_y = 53
+
         self.camera_app = camera_app
         self._running = True
         # self._stop_event = threading.Event()
@@ -242,7 +330,7 @@ class CameraMoveWorker(QObject):
         self.start_move = False
         self.move_check_wait_cond = QWaitCondition()
         self.move_check_mutex = QMutex()
-        self.camera_move_function = None
+        self.move_camera_get_frame_done_callback = None
         self.positive_folder = None
         self.breakpoint = False
 
@@ -256,8 +344,8 @@ class CameraMoveWorker(QObject):
         self._mutex.lock()
         self._running = False
         self._wait_cond.wakeOne()
-        self._mutex.unlock()
         self.start_move = False
+        self._mutex.unlock()
         self.move_check_wait_cond.wakeOne()
     
     def run(self):
@@ -266,50 +354,37 @@ class CameraMoveWorker(QObject):
             self._mutex.lock()
             self._wait_cond.wait(self._mutex)
             self._mutex.unlock()
-            
+
             while self.start_move:
-                # 以主線程更新的 current_frame 為來源（較 thread-safe）
                 frame_copy = None
                 if self.camera_app.current_frame is not None:
                     try:
+                        print("move camera get frame")
                         frame_copy = self.camera_app.current_frame.copy()
                     except Exception:
                         frame_copy = None
 
-                # 如果沒有可用的 frame，短暫等待並重試
                 if frame_copy is None or getattr(frame_copy, 'size', 0) == 0:
                     time.sleep(0.05)
                     continue
-
-                # 如果有外部指定 camera_move_function，直接在 worker 執行（可能是 handle_manual_match）
-                if callable(self.camera_move_function):
-                    if self.breakpoint == True:
-                        self.breakpoint = False
-                    else:
-                        try:
-                            # 優先嘗試把 frame 傳入給 function，若不接受參數則改為不傳
-                            try:
-                                self.camera_move_function(frame_copy)
-                            except TypeError:
-                                self.camera_move_function()
-                        except Exception as e:
-                            print(f"camera_move_function error: {e}")
-                else:
-                    folder = self.camera_app.get_move_folder(self.positive_folder , self.camera_app.fount_back)
-                    
-                    os.makedirs(folder, exist_ok=True)
+                
+                print("CameraMoveWorker worker_callback call")
+                # 如果有外部指定 move_camera_get_frame_done_callback ，直接在 worker 執行
+                if callable(self.move_camera_get_frame_done_callback):
                     try:
-                        self.camera_app.snapshot_path(frame_copy, folder, message=False)
-                        # 檢測並保存 aoi_rect 到 config.ini
-                        self.camera_app.detect_and_save_aoi_rect(frame_copy, folder)
-                    except Exception as e:
-                        print(f"snapshot save error: {e}")
+                        self.move_camera_get_frame_done_callback(frame_copy)
+                    except TypeError:
+                        print(f"move camera callback error: {e}")
+
+                print("CameraMoveWorker worker_callback done")
 
                 if self.breakpoint == True:
                     break
                 # 移動到下一個位置（非阻塞），等待裝置到達
                 try:
-                    self.camera_app.move_to_next_position()
+                    print("move camera to next position ")
+                    self.move_to_next_position()
+                    print("move camera to next position done")
                 except Exception as e:
                     print(f"move_to_next_position error: {e}")
 
@@ -318,28 +393,107 @@ class CameraMoveWorker(QObject):
                 self.move_check_mutex.unlock()
 
                 # 檢查是否回到起點
-                if (self.camera_app.LT_300H_dev.target_x == self.camera_app.LT_300H_dev.start_x and 
-                    self.camera_app.LT_300H_dev.target_y == self.camera_app.LT_300H_dev.start_y):
+                if (self.LT_300H_dev.target_x == self.LT_300H_dev.start_x and 
+                    self.LT_300H_dev.target_y == self.LT_300H_dev.start_y):
                     self.start_move = False
-                    self.breakpoint = False
+                    #self.breakpoint = False
                     break
 
                 time.sleep(0.1)  # 避免 CPU 佔用過高
-            # 拍照完成
-            if self._running == True:
-                if self.breakpoint == False:
-                    self.camera_move_done.emit()
+
+            self.camera_move_done.emit()
+
+    def calculate_all_position(self):
+        self.all_position = 
+        try:
+            cur_x = int(float(self.LT_300H_dev.cur_x))
+        except Exception:
+            cur_x = 0
+        try:
+            cur_y = int(float(self.LT_300H_dev.cur_y))
+        except Exception:
+            cur_y = 0
+            
+        # 若尚未設定方向，預設向右
+        if not hasattr(self, '_x_dir'):
+            self._x_dir = 1
+
+        next_x = cur_x + (self._x_dir * self.step_x)
+        new_x = cur_x
+        new_y = cur_y
+
+        # 如果 next_x 在合法範圍內，則沿 x 前進
+        if self.LT_300H_dev.limit_x[0] <= next_x <= self.LT_300H_dev.limit_x[1]:
+            new_x = next_x
+        else:
+            # 已到達邊界，先在相同 x 做 y 步進，再反向 x
+            new_x = cur_x
+            new_y = cur_y + self.step_y
+            if new_y > self.LT_300H_dev.limit_y[1]: #到最後一次的 y
+                new_y = self.LT_300H_dev.limit_y[0]
+                new_x = self.LT_300H_dev.limit_x[0]
+                self._x_dir = 1
+            else:
+                # 反轉 x 方向，下一次會沿相反方向走
+                self._x_dir *= -1
+
+            # 回調函數接收來源
+
+    def move_to_next_position(self):
+        try:
+            cur_x = int(float(self.LT_300H_dev.cur_x))
+        except Exception:
+            cur_x = 0
+        try:
+            cur_y = int(float(self.LT_300H_dev.cur_y))
+        except Exception:
+            cur_y = 0
+            
+        # 若尚未設定方向，預設向右
+        if not hasattr(self, '_x_dir'):
+            self._x_dir = 1
+
+        next_x = cur_x + (self._x_dir * self.step_x)
+        new_x = cur_x
+        new_y = cur_y
+
+        # 如果 next_x 在合法範圍內，則沿 x 前進
+        if self.LT_300H_dev.limit_x[0] <= next_x <= self.LT_300H_dev.limit_x[1]:
+            new_x = next_x
+        else:
+            # 已到達邊界，先在相同 x 做 y 步進，再反向 x
+            new_x = cur_x
+            new_y = cur_y + self.step_y
+            if new_y > self.LT_300H_dev.limit_y[1]: #到最後一次的 y
+                new_y = self.LT_300H_dev.limit_y[0]
+                new_x = self.LT_300H_dev.limit_x[0]
+                self._x_dir = 1
+            else:
+                # 反轉 x 方向，下一次會沿相反方向走
+                self._x_dir *= -1
+
+        # 回調函數
+        def on_position_arrived(self, context):
+            if context == "move_to_next_position":
+                self.camera_move_worker.move_check_wait_cond.wakeOne()
+        try:
+            # 呼叫裝置移動，並傳遞回調函數
+            self.LT_300H_dev.move_to(new_x, new_y, self.LT_300H_dev.start_z, 
+                                     callback=on_position_arrived,
+                                     context="move_to_next_position")
+        except Exception as e:
+            print(f"move_to_next_position failed: {e}")
 
 class CameraApp(QWidget):
     message_box = pyqtSignal(str, str, int)
     def __init__(self):
         super().__init__()
 
-        self.LT_300H_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
-        self.LT_300H_dev.set_start_position(35, 48, 21)
-        self.LT_300H_dev.set_max_limit_position(150, 110, 300)
+        # self.LT_300H_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+        # self.LT_300H_dev.set_start_position(35, 48, 21)
+        # self.LT_300H_dev.set_max_limit_position(150, 110, 300)
         # x 方向：1 表示向右 (0->200)，-1 表示向左 (200->0)
-        self._x_dir = 1
+        # self._x_dir = 1
 
         self.camera_setting()
 
@@ -358,9 +512,7 @@ class CameraApp(QWidget):
         self.image_label.video_height = self.video_height
         self.image_label.aoi_rect_changed.connect(self.on_aoi_rect_changed)
         self.control_panel = ControlPanel(self)
-        # self.n_label = QLabel("")  # 新增：顯示圈數
-        # self.n_label.setStyleSheet("color: yellow; font-size: 32px; font-weight: bold; background: rgba(0,0,0,0.5);")
-        # self.n_label.setAlignment(Qt.AlignCenter)
+
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)  # 讓 layout 沒有邊框
         layout.addWidget(self.image_label)
@@ -379,14 +531,15 @@ class CameraApp(QWidget):
         self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.fount_back = None
         self.goldens = []
-        self.aoi_rect = [21 , 2160 - 21 , 38 , 3840 -38 ]#None  # 用於同步 AOI 狀態
-        self.matching = False  # 新增：避免重複啟動 worker
+        #self.aoi_rect = [21 , 2160 - 21 , 38 , 3840 -38 ]#None  # 用於同步 AOI 狀態
+
         # 新增：常駐 thread/worker
         self.match_thread = QThread()
-        self.worker = AOIMatchWorker(self.aoi_model)
-        self.worker.moveToThread(self.match_thread)
-        self.worker.match_done.connect(self.show_image)
-        #self.match_thread.started.connect(self.worker.run)
+        self.AOI_worker = AOIMatchWorker(self.aoi_model)
+        self.AOI_worker.moveToThread(self.match_thread)
+        self.AOI_worker.match_done.connect(self.show_image)
+        self.AOI_worker.message_box.connect(self.show_message_box)
+        self.match_thread.started.connect(self.AOI_worker.run)
         self.match_thread.start()  # 直接啟動 thread，讓 worker 進入等待
         
         # 新增：snapshot positive worker
@@ -396,12 +549,6 @@ class CameraApp(QWidget):
         self.camera_move_worker.camera_move_done.connect(self.on_move_done)
         self.camera_move_thread.started.connect(self.camera_move_worker.run)
         self.camera_move_thread.start()
-
-    # 回調函數接收來源
-    def on_position_arrived(self, context):
-        if context == "move_to_next_position":
-            self.camera_move_worker.move_check_wait_cond.wakeOne()
-            #self.handle_manual_match()
 
     def on_aoi_rect_changed(self, rect):
         self.aoi_rect = rect
@@ -416,10 +563,8 @@ class CameraApp(QWidget):
             bytes_per_line = ch * w
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
             self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-            self.matching = False
         except:
             print("show_image crash")
-            self.matching = False
 
     def update_frame(self):
         ret, frame = self.cap.read()
@@ -446,34 +591,72 @@ class CameraApp(QWidget):
         self.show_message_box("拍照完成", f"已儲存於：\n{save_path}")
         return save_path
 
-    def handle_manual_match(self):   
-        self.set_sample()
-        if self.current_frame is not None and self.goldens and not self.matching :
-            frame = self.current_frame.copy()
-            today = "AOI_" + time.strftime("%Y%m%d")
-            save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back)
-            self.last_frame = self.snapshot_path(self.current_frame , save_dir)
-
-            self.display_video = False
-            
-            threshold = self.control_panel.threshold_spin.value()
-            n_erode = self.control_panel.erode_spin.value()
-            n_dilate = self.control_panel.dilate_spin.value()
-            min_samples = self.control_panel.min_samples_spin.value()
-            self.worker.set_params(frame, self.goldens, self.aoi_rect, threshold, n_erode, n_dilate, min_samples)
-            self.matching = True
-
-            circle_image , n = self.worker.match()
-            self.worker.match_done.emit(circle_image)
-            if n > 0 or n == -1:
-                self.camera_move_worker.breakpoint = True
-                self.message_box.emit("檢測瑕疵", f"有瑕疵: {n} 個", -1)
-
-    def snapshot_positive_image(self, use_manual_match: bool = False):
-        """啟動正樣本拍照 (在背景 thread 中執行)
-        If use_manual_match=True, worker will call CameraApp.handle_manual_match() inside worker thread.
-        """
+    # def set_sample(self):
+    #     folder_path = self.control_panel.folder_combo.currentText()
+    #     if not folder_path:
+    #         QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
+    #         return
+    #     folder_path = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back)
+    #     self.goldens = []
+    #     if not os.path.isdir(folder_path):            
+    #         print(f"資料夾不存在！ folder_path = {folder_path}" )
+    #         self.show_message_box("設定檢測樣本", "資料夾不存在！", 3000)      
+    #         return
+    #     files = get_file(folder_path , extension='.bmp')
+    #     if not files:
+    #         print(f"資料夾內無BMP檔！ {folder_path}")
+    #         self.show_message_box("設定檢測樣本", "資料夾內無BMP檔！", 3000)               
+    #         return
         
+    #     for img_path in files:
+    #         golden_img = cv2.imread(img_path)
+    #         kp, des = self.aoi_model.get_keypoint_grid(golden_img)
+    #         self.goldens.append([golden_img, kp, des])
+
+    #     # 嘗試讀取 ini 檔案並設定 aoi_rect
+    #     inifiles = get_file(folder_path , extension='.ini')
+    #     if inifiles:
+    #         try:
+    #             config = configparser.ConfigParser()
+    #             config.read(inifiles[0])
+                
+    #             if config.has_section('Rect'):
+    #                 x = int(config.get('Rect', 'x'))
+    #                 y = int(config.get('Rect', 'y'))
+    #                 width = int(config.get('Rect', 'width'))
+    #                 height = int(config.get('Rect', 'height'))
+                    
+    #                 # 轉換為 aoi_rect 格式 [top, bottom, left, right]
+    #                 self.aoi_rect = [y, y + height, x, x + width]
+    #         except Exception as e:
+    #             print(f"讀取 INI 檔案失敗: {e}")
+
+    def camera_move_done_callback(self , frame):
+        # be fix
+        today = "AOI_" + time.strftime("%Y%m%d")
+        save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back)
+        self.last_frame = self.snapshot_path(self.current_frame , save_dir)
+        ##
+        self.AOI_worker.detect_frame.append(frame.copy())
+        self.AOI_worker.wake()
+
+        #if detect_frame :
+        #    today = "AOI_" + time.strftime("%Y%m%d")
+        #    save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back)
+        #    self.last_frame = self.snapshot_path(self.current_frame , save_dir)
+#
+        #    self.display_video = False
+#
+        #    circle_image , n = self.AOI_worker.match()
+        #    self.AOI_worker.match_done.emit(circle_image)
+        #    if n > 0 or n == -1:
+        #        self.camera_move_worker.breakpoint = True
+        #        self.message_box.emit("檢測瑕疵", f"有瑕疵: {n} 個", -1)
+
+    def snapshot_positive_image(self):
+        """啟動正樣本拍照 (在背景 thread 中執行)
+        """
+        start_time = time.time()
         positive_folder = (self.control_panel.folder_save_path 
                           if hasattr(self.control_panel, 'folder_save_path') 
                           else os.path.dirname(os.path.abspath(__file__)))
@@ -501,19 +684,31 @@ class CameraApp(QWidget):
                     return
             else:
                 self.fount_back = fount_back
+        
+        end_time = time.time()
+        
+        print(f"len(front_samples) = {len(front_samples)} len(back_samples) = {len(back_samples)} time = {end_time - start_time} ")
 
-        self.camera_move_worker.camera_move_function = None
-        # 啟動背景 thread 執行拍照
-        self.camera_move_worker.positive_folder = positive_folder
+        def worker_callback(frame_copy):
+            print("CameraMoveWorker worker_callback called")
+            folder = self.get_move_folder(positive_folder , fount_back)
+            os.makedirs(folder, exist_ok=True)
+            try:
+                self.snapshot_path(frame_copy, folder, message=False)
+                self.detect_and_save_aoi_rect(frame_copy, folder)
+            except Exception as e:
+                print(f"snapshot save error: {e}")
+
+        self.camera_move_worker.move_camera_get_frame_done_callback = worker_callback
         self.camera_move_worker.wake()
         
     def on_move_done(self):
         """拍照完成時的回調"""
-        if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
-            return  # 只在回到起點時顯示訊息
-        if self.camera_move_worker.camera_move_function == None:
+        #if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
+        #    return  # 只在回到起點時顯示訊息
+        if self.camera_move_worker.move_camera_get_frame_done_callback == None:
             self.show_message_box("拍照完成", "正樣本拍照完成")
-        elif self.camera_move_worker.camera_move_function == self.handle_manual_match:
+        elif self.camera_move_worker.move_camera_get_frame_done_callback == self.camera_move_done_callback:
             self.show_message_box("檢測完成", "PASS" , -1)
 
     def detect_and_save_aoi_rect(self, frame, folder_path):
@@ -565,52 +760,6 @@ class CameraApp(QWidget):
             print(f"detect_and_save_aoi_rect error: {e}")
             self.aoi_rect = [21, 2160 - 21, 38, 3840 - 38]
 
-    def set_sample(self):
-        folder = self.control_panel.folder_combo.currentText()
-        if not folder:
-            if self.goldens is not None:
-                self.goldens = []
-                self.display_video = True 
-                return
-            print("請先選擇資料夾！")
-            QMessageBox.information(self, "設定檢測樣本", "請先選擇資料夾！")
-            return
-        folder = self.get_move_folder(folder , self.fount_back)
-        self.goldens = []
-        folder_path = os.path.join(self.base_path, folder)
-        if not os.path.isdir(folder_path):            
-            print(f"資料夾不存在！ folder_path = {folder_path}" )
-            self.show_message_box("設定檢測樣本", "資料夾不存在！", 3000)      
-            return
-        files = get_file(folder_path , extension='.bmp')
-        if not files:
-            print(f"資料夾內無BMP檔！ {folder_path}")
-            self.show_message_box("設定檢測樣本", "資料夾內無BMP檔！", 3000)               
-            return
-        
-        for img_path in files:
-            golden_img = cv2.imread(img_path)
-            kp, des = self.aoi_model.get_keypoint_grid(golden_img)
-            self.goldens.append([golden_img, kp, des])
-
-        # 嘗試讀取 ini 檔案並設定 aoi_rect
-        inifiles = get_file(folder_path , extension='.ini')
-        if inifiles:
-            try:
-                config = configparser.ConfigParser()
-                config.read(inifiles[0])
-                
-                if config.has_section('Rect'):
-                    x = int(config.get('Rect', 'x'))
-                    y = int(config.get('Rect', 'y'))
-                    width = int(config.get('Rect', 'width'))
-                    height = int(config.get('Rect', 'height'))
-                    
-                    # 轉換為 aoi_rect 格式 [top, bottom, left, right]
-                    self.aoi_rect = [y, y + height, x, x + width]
-            except Exception as e:
-                print(f"讀取 INI 檔案失敗: {e}")
-
     def closeEvent(self, event):
         self.LT_300H_dev.close()
         self.cap.release()
@@ -627,50 +776,57 @@ class CameraApp(QWidget):
             self.match_thread.wait()
         event.accept()
 
-    def move_to_next_position(self):
-        try:
-            cur_x = int(float(self.LT_300H_dev.cur_x))
-        except Exception:
-            cur_x = 0
-        try:
-            cur_y = int(float(self.LT_300H_dev.cur_y))
-        except Exception:
-            cur_y = 0
+    # def move_to_next_position(self):
+    #     try:
+    #         cur_x = int(float(self.LT_300H_dev.cur_x))
+    #     except Exception:
+    #         cur_x = 0
+    #     try:
+    #         cur_y = int(float(self.LT_300H_dev.cur_y))
+    #     except Exception:
+    #         cur_y = 0
             
-        # 掃描邏輯（蛇形）：沿 x 方向前進，抵達邊界則在相同 x 做 y 步進，並反向 x
-        step_x = 90
-        step_y = 53
+    #     # 掃描邏輯（蛇形）：沿 x 方向前進，抵達邊界則在相同 x 做 y 步進，並反向 x
+    #     step_x = 90
+    #     step_y = 53
 
-        # 若尚未設定方向，預設向右
-        if not hasattr(self, '_x_dir'):
-            self._x_dir = 1
+    #     # 若尚未設定方向，預設向右
+    #     if not hasattr(self, '_x_dir'):
+    #         self._x_dir = 1
 
-        next_x = cur_x + (self._x_dir * step_x)
-        new_x = cur_x
-        new_y = cur_y
+    #     next_x = cur_x + (self._x_dir * step_x)
+    #     new_x = cur_x
+    #     new_y = cur_y
 
-        # 如果 next_x 在合法範圍內，則沿 x 前進
-        if self.LT_300H_dev.limit_x[0] <= next_x <= self.LT_300H_dev.limit_x[1]:
-            new_x = next_x
-        else:
-            # 已到達邊界，先在相同 x 做 y 步進，再反向 x
-            new_x = cur_x
-            new_y = cur_y + step_y
-            if new_y > self.LT_300H_dev.limit_y[1]: #到最後一次的 y
-                new_y = self.LT_300H_dev.limit_y[0]
-                new_x = self.LT_300H_dev.limit_x[0]
-                self._x_dir = 1
-            else:
-                # 反轉 x 方向，下一次會沿相反方向走
-                self._x_dir *= -1
-        try:
-            # 呼叫裝置移動，並傳遞回調函數
-            self.LT_300H_dev.move_to(new_x, new_y, self.LT_300H_dev.start_z, 
-                                     callback=self.on_position_arrived,
-                                     context="move_to_next_position")
+    #     # 如果 next_x 在合法範圍內，則沿 x 前進
+    #     if self.LT_300H_dev.limit_x[0] <= next_x <= self.LT_300H_dev.limit_x[1]:
+    #         new_x = next_x
+    #     else:
+    #         # 已到達邊界，先在相同 x 做 y 步進，再反向 x
+    #         new_x = cur_x
+    #         new_y = cur_y + step_y
+    #         if new_y > self.LT_300H_dev.limit_y[1]: #到最後一次的 y
+    #             new_y = self.LT_300H_dev.limit_y[0]
+    #             new_x = self.LT_300H_dev.limit_x[0]
+    #             self._x_dir = 1
+    #         else:
+    #             # 反轉 x 方向，下一次會沿相反方向走
+    #             self._x_dir *= -1
+    #     try:
+    #         # 呼叫裝置移動，並傳遞回調函數
+    #         self.LT_300H_dev.move_to(new_x, new_y, self.LT_300H_dev.start_z, 
+    #                                  callback=self.on_position_arrived,
+    #                                  context="move_to_next_position")
 
-        except Exception as e:
-            print(f"move_to_next_position failed: {e}")
+    #     except Exception as e:
+    #         print(f"move_to_next_position failed: {e}")
+
+    def check_test_fount_back(self,folder_name: str) -> int:
+        #sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
+        fount_sample = get_file(self.get_move_folder(folder_name , 0) , extension='.bmp')
+        back_sample = get_file(self.get_move_folder(folder_name , 1) , extension='.bmp')
+        fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
+        return fount_back
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -682,28 +838,45 @@ class CameraApp(QWidget):
             self.control_panel.activateWindow()
 
         elif event.key() == Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
-            sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
-            fount_sample = get_file(self.get_move_folder(sample_path , 0) , extension='.bmp')
-            back_sample = get_file(self.get_move_folder(sample_path , 1) , extension='.bmp')
-            fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
-            if fount_back < 0 :
-                self.show_message_box("沒有樣本", f"{sample_path} 沒有樣本", 3000)
+            self.fount_back = self.check_test_fount_back(os.path.join(self.base_path, self.control_panel.folder_combo.currentText()))
+
+            if self.fount_back < 0 :
+                self.show_message_box("沒有樣本", f"{os.path.join(self.base_path, self.control_panel.folder_combo.currentText())} 沒有樣本", 3000)
                 return
-            self.fount_back = fount_back
-            self.camera_move_worker.camera_move_function = self.handle_manual_match
+
+            self.AOI_worker.detect_frame = []
+            self.AOI_worker.detect_result = []
+            self.AOI_worker.detect_index = 0 
+            self.AOI_worker.detect_max_index = 4
+
+            threshold = self.control_panel.threshold_spin.value()
+            n_erode = self.control_panel.erode_spin.value()
+            n_dilate = self.control_panel.dilate_spin.value()
+            min_samples = self.control_panel.min_samples_spin.value()
+            self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+
+            self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
             self.camera_move_worker.wake()
 
         elif event.key() == Qt.Key_D:  # 移動並觸發手動圈數計算
-            sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
-            fount_sample = get_file(self.get_move_folder(sample_path , 0) , extension='.bmp')
-            back_sample = get_file(self.get_move_folder(sample_path , 1) , extension='.bmp')
-            fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
-            if fount_back < 0 :
-                self.show_message_box("沒有樣本", f"{sample_path} 沒有樣本", 3000)
+            self.fount_back = self.check_test_fount_back(os.path.join(self.base_path, self.control_panel.folder_combo.currentText()))
+            
+            if self.fount_back < 0 :
+                self.show_message_box("沒有樣本", f"{os.path.join(self.base_path, self.control_panel.folder_combo.currentText())} 沒有樣本", 3000)
                 return
-            self.fount_back = fount_back
-            self.handle_manual_match()
-            #self.worker.wake()
+            
+            self.AOI_worker.detect_frame[self.camera_move_worker.current_position_index] = self.current_frame.copy()
+            self.AOI_worker.detect_index = self.camera_move_worker.current_position_index
+            self.AOI_worker.detect_max_index = self.camera_move_worker.current_position_index + 1
+        
+            threshold = self.control_panel.threshold_spin.value()
+            n_erode = self.control_panel.erode_spin.value()
+            n_dilate = self.control_panel.dilate_spin.value()
+            min_samples = self.control_panel.min_samples_spin.value()
+            self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+        
+            #self.camera_move_done_callback()
+            self.AOI_worker.wake()
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()

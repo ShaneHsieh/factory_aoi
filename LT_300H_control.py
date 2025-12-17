@@ -88,7 +88,7 @@ class LT300HControl(SerialDevice):
     
     def _check_arrival(self):
         """背景執行緒：持續檢查是否到達目標位置"""
-        max_wait = 60  # 最多等待 60 秒
+        max_wait = 5  # 最多等待 5 秒
         start_time = time.time()
         
         while self._checking and (time.time() - start_time) < max_wait:
@@ -107,6 +107,8 @@ class LT300HControl(SerialDevice):
             
             time.sleep(0.1)
         
+        print(f"move to {time.time() - start_time} s")
+
         if self._checking:
             print("⚠️ 超時：未在指定時間內到達目標位置")
             self._checking = False

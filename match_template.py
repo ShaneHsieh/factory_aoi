@@ -70,7 +70,6 @@ class cv_aoi:
             if np.isnan(avg_back) and np.isnan(avg_front):
                 return -1
             elif np.isnan(avg_back) and any(x > 4 for x in front_scores):
-                print("front_scores = " , front_scores)
                 return 0
             elif np.isnan(avg_front) and any(x > 4 for x in back_scores):
                 return 1
