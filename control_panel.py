@@ -29,6 +29,7 @@ class ControlPanel(QWidget):
         self.folder_combo = FolderComboBox()
         self.folder_combo.setFont(ui_font)
         self.folder_combo.update_callback = self.update_folder_list
+        self.folder_combo.currentTextChanged.connect(self.camera_app.on_folder_changed) # 當選項改變時，通知 camera_app
         self.folder_combo.addItem("")
         self.set_sample_btn = QPushButton("設定檢測樣本")
         self.set_sample_btn.setFont(ui_font)
