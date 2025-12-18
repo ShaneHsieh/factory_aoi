@@ -44,8 +44,6 @@ class AOILabel(QLabel):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 label 填滿空間
         self.label_width = self.width()   # 新增：儲存 label 寬度
         self.label_height = self.height() # 新增：儲存 label 高度
-        self.aoi_points = []  # 移進 AOILabel
-        self.aoi_rect = None  # 移進 AOILabel
         self.video_width = 2560  # 預設值，CameraApp 會設置
         self.video_height = 1440
         # 新增 zoom 狀態
@@ -67,93 +65,112 @@ class AOILabel(QLabel):
         pos = event.position() if hasattr(event, "position") else event.pos()
         x, y = int(pos.x()), int(pos.y())
         delta = event.angleDelta().y()
+        #print(f"wheelEvent {x} , {y} {delta}")
         # 呼叫 zoom_at
         self.zoom_at(x, y, delta)
         self.update()
         # 不呼叫 super().wheelEvent(event) 以避免父類預設行為
-
     def zoom_at(self, x, y, delta):
+        if self._pixmap is None:
+            return
+
+        # 1. 計算滑鼠在原始圖片上的座標
+        widget_w, widget_h = self.width(), self.height()
+        pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
+        
+        # 計算顯示的 pixmap 尺寸與偏移
+        scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
+        scaled_w, scaled_h = int(pixmap_w * scale), int(pixmap_h * scale)
+        offset_x = (widget_w - scaled_w) // 2
+        offset_y = (widget_h - scaled_h) // 2
+        
+        # 轉換 widget 座標到 scaled_pixmap 座標
+        scaled_x = x - offset_x
+        scaled_y = y - offset_y
+        
+        # 轉換 scaled_pixmap 座標到原始 pixmap 座標
+        if self.zoom_scale == 1.0:
+            img_x = scaled_x / scale
+            img_y = scaled_y / scale
+        else:
+            crop_w_old = pixmap_w / self.zoom_scale
+            crop_h_old = pixmap_h / self.zoom_scale
+            img_x = self.left + (scaled_x / widget_w) * crop_w_old
+            img_y = self.top + (scaled_y / widget_h) * crop_h_old
+        
+        # 2. 計算新縮放比例
         # delta > 0 放大, < 0 縮小
         new_scale = self.zoom_scale + 0.25 if delta > 0 else self.zoom_scale - 0.25
         new_scale = max(1.0, min(new_scale, 20.0)) 
-        if self._pixmap is None:
-            return
-        widget_w, widget_h = self.width(), self.height()
-        pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-
-        if self.zoom_scale > 1.01 and self.zoom_center is not None:
-
-            crop_w = int(pixmap_w / self.zoom_scale)
-            crop_h = int(pixmap_h / self.zoom_scale)
-        else:
-            self.left, self.top = 0, 0
-            crop_w, crop_h = pixmap_w, pixmap_h
-
-        rel_x = x / widget_w
-        rel_y = y / widget_h
-
-        img_x = int(self.left + rel_x * crop_w)
-        img_y = int(self.top + rel_y * crop_h)
+        
+        # 3. 更新縮放狀態
         self.zoom_scale = new_scale
-        self.zoom_center = (img_x, img_y)
+        if self.zoom_scale > 1.0:
+            self.zoom_center = (img_x, img_y)
+        else:
+            self.zoom_center = None # 回到初始狀態
+        
+        #print(f"zoom_at image coord: ({img_x:.2f}, {img_y:.2f}), new_scale: {new_scale}")
 
     def paintEvent(self, event):
-        from PyQt5.QtWidgets import QStyle
-        from PyQt5.QtCore import Qt
         from PyQt5.QtGui import QPainter
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
         if self._pixmap:
             widget_w, widget_h = self.width(), self.height()
             pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-            # zoom 狀態
-            if self.zoom_scale > 1.01 and self.zoom_center is not None:
-                zx, zy = self.zoom_center
-
-                # 維持原圖比例裁切
+             
+            if self.zoom_scale > 1.0 and self.zoom_center is not None:
+                # --- 縮放模式 ---
+                img_x, img_y = self.zoom_center
+                
                 crop_w = int(pixmap_w / self.zoom_scale)
                 crop_h = int(pixmap_h / self.zoom_scale)
-                self.left = max(0, zx - crop_w // 2)
-                right = min(pixmap_w, self.left + crop_w)
-                self.top = max(0, zy - crop_h // 2)
-                bottom = min(pixmap_h, self.top + crop_h)
-                cropped = self._pixmap.copy(self.left, self.top, right - self.left, bottom - self.top)
+                
+                # 計算裁切框左上角，讓 img_x, img_y 保持在滑鼠位置
+                # 這部分有點複雜，因為要考慮滑鼠在 widget 上的相對位置
+                # 簡化處理：以 zoom_center 為中心進行裁切
+                self.left = max(0, int(img_x - crop_w / 2))
+                self.top = max(0, int(img_y - crop_h / 2))
+                
+                # 確保裁切框不超過圖片邊界
+                if self.left + crop_w > pixmap_w:
+                    self.left = pixmap_w - crop_w
+                if self.top + crop_h > pixmap_h:
+                    self.top = pixmap_h - crop_h
+                
+                # 再次確保 left/top 不為負
+                self.left = max(0, self.left)
+                self.top = max(0, self.top)
+
+                cropped = self._pixmap.copy(self.left, self.top, crop_w, crop_h)
                 scaled_pixmap = cropped.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                
+                # 繪製時置中 (如果 scaled_pixmap 沒有填滿 widget)
+                x = (widget_w - scaled_pixmap.width()) // 2
+                y = (widget_h - scaled_pixmap.height()) // 2
+                painter.drawPixmap(x, y, scaled_pixmap)
+
             else:
+                # --- 正常顯示模式 ---
+                self.zoom_scale = 1.0
+                self.zoom_center = None
+                self.left = 0
+                self.top = 0
                 scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
                 new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
                 scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = (widget_w - scaled_pixmap.width()) // 2
-            y = (widget_h - scaled_pixmap.height()) // 2
-            painter.drawPixmap(x, y, scaled_pixmap)
+                x = (widget_w - scaled_pixmap.width()) // 2
+                y = (widget_h - scaled_pixmap.height()) // 2
+                painter.drawPixmap(x, y, scaled_pixmap)
         # 不要呼叫 super().paintEvent(event)，避免 QLabel 預設繪圖覆蓋
 
     def mousePressEvent(self, event):
-        # if event.button() == 1:  # 左鍵
-        #     self.handle_aoi_point(event.pos())
-        # elif event.button() == 2:  # 右鍵
-        #     if len(self.aoi_points) > 0:
-        #         self.aoi_points = []
-        #     elif self.aoi_rect is not None:
-        #         self.clear_aoi_rect()
+        if event.button() == 1: 
+            None
+        elif event.button() == 2:
+            None
         super().mousePressEvent(event)
-
-    def handle_aoi_point(self, pos):
-        if self.aoi_rect is not None:
-            return
-        self.aoi_points.append((pos.x(), pos.y()))
-        if len(self.aoi_points) == 2:
-            x1, y1 = (np.array(self.aoi_points[0]).astype(float) / np.array([self.label_width / self.video_width, self.label_height / self.video_height])).astype(int)
-            x2, y2 = (np.array(self.aoi_points[1]).astype(float) / np.array([self.label_width / self.video_width, self.label_height / self.video_height])).astype(int)
-            self.aoi_rect = [min(y1, y2), max(y1, y2), min(x1, x2), max(x1, x2)]  # [top, bottom, left, right]
-            self.aoi_points = []
-            print(f"AOI 設定為: {self.aoi_rect}")
-            self.aoi_rect_changed.emit(self.aoi_rect)
-
-    def clear_aoi_rect(self):
-        self.aoi_rect = None
-        print("AOI 已清除")
-        self.aoi_rect_changed.emit(self.aoi_rect)
 
 class AOIMatchWorker(QObject):
     match_done = pyqtSignal()
@@ -228,16 +245,13 @@ class AOIMatchWorker(QObject):
         self.detect_frame.append(frame.copy())
 
     def set_goldens_sample(self, folder_path, camera_move_worker):
-        """
-        根據 camera_move_worker 的路徑順序，載入對應資料夾的樣本和 aoi_rect。
-        """
+        """根據 camera_move_worker 的路徑順序，載入所有樣本和 aoi_rect。"""
         all_goldens = []
         all_aoi_rects = []
 
         if not os.path.isdir(folder_path):
             self.message_box.emit("設定檢測樣本", f"資料夾不存在！\n{folder_path}", 3000)
             return
-
         if not camera_move_worker or not hasattr(camera_move_worker, 'position'):
             self.message_box.emit("設定檢測樣本", "CameraMoveWorker 不可用！", 3000)
             return
@@ -245,45 +259,49 @@ class AOIMatchWorker(QObject):
         # 依序讀取正面(0)和反面(1)
         for fount in range(2):
             for i in range(len(camera_move_worker.position)):
-                x, y, z = camera_move_worker.get_position(i)
-                sub_dir_name = f"{fount}_{x}_{y}_{z}"
-                sub_dir = os.path.join(folder_path, sub_dir_name)
-                goldens_in_subdir = []
-                bmp_files = get_file(sub_dir, extension='.bmp')
-                if not bmp_files:
-                    print(f"{sub_dir} no bmp file, appending empty sample.")
-                    # 即使沒有樣本，也應佔一個位置，以維持索引同步
-                    all_goldens.append(goldens_in_subdir)
-                    all_aoi_rects.append(None)
-                    continue
-
-                for img_path in bmp_files:
-                    golden_img = cv2.imread(img_path)
-                    kp, des = self.aoi_model.get_keypoint_grid(golden_img)
-                    goldens_in_subdir.append([golden_img, kp, des])
-                
-                # 讀取該子資料夾的 ini 檔
-                aoi_rect = None
-                inifiles = get_file(sub_dir, extension='.ini')
-                if inifiles:
-                    try:
-                        config = configparser.ConfigParser()
-                        config.read(inifiles[0])
-                        if config.has_section('Rect'):
-                            x_ini = int(config.get('Rect', 'x'))
-                            y_ini = int(config.get('Rect', 'y'))
-                            width = int(config.get('Rect', 'width'))
-                            height = int(config.get('Rect', 'height'))
-                            aoi_rect = [y_ini, y_ini + height, x_ini, x_ini + width]
-                    except Exception as e:
-                        self.message_box.emit("讀取 .ini 失敗", f"讀取 {inifiles[0]} 時發生錯誤: {e}", 3000)
-
+                goldens_in_subdir, aoi_rect = self.load_sample_for_index(folder_path, camera_move_worker, fount, i)
                 all_goldens.append(goldens_in_subdir)
                 all_aoi_rects.append(aoi_rect)
 
         self.detect_max_index = camera_move_worker.position
         self.goldens = all_goldens
         self.aoi_rect = all_aoi_rects
+
+    def load_sample_for_index(self, folder_path, camera_move_worker, fount, index):
+        """為指定的 fount 和 index 載入樣本和 aoi_rect。"""
+        x, y, z = camera_move_worker.get_position(index)
+        sub_dir_name = f"{fount}_{x}_{y}_{z}"
+        sub_dir = os.path.join(folder_path, sub_dir_name)
+        return self.sample_load(sub_dir)
+    
+    def sample_load(self,sub_dir):
+        goldens_in_subdir = []
+        bmp_files = get_file(sub_dir, extension='.bmp')
+        if not bmp_files:
+            print(f"{sub_dir} no bmp file, returning empty sample.")
+            return goldens_in_subdir, None
+
+        for img_path in bmp_files:
+            golden_img = cv2.imread(img_path)
+            kp, des = self.aoi_model.get_keypoint_grid(golden_img)
+            goldens_in_subdir.append([golden_img, kp, des])
+        
+        aoi_rect = None
+        inifiles = get_file(sub_dir, extension='.ini')
+        if inifiles:
+            try:
+                config = configparser.ConfigParser()
+                config.read(inifiles[0])
+                if config.has_section('Rect'):
+                    x_ini = int(config.get('Rect', 'x'))
+                    y_ini = int(config.get('Rect', 'y'))
+                    width = int(config.get('Rect', 'width'))
+                    height = int(config.get('Rect', 'height'))
+                    aoi_rect = [y_ini, y_ini + height, x_ini, x_ini + width]
+            except Exception as e:
+                self.message_box.emit("讀取 .ini 失敗", f"讀取 {inifiles[0]} 時發生錯誤: {e}", 3000)
+        
+        return goldens_in_subdir, aoi_rect
 
     def match(self , index = -1):
         #print(f"self.detect_index = {self.detect_index} self.goldens = {len(self.goldens)} len(self.detect_frame) {len(self.detect_frame)}")
@@ -531,6 +549,8 @@ class CameraApp(QWidget):
 
         self.control_panel = ControlPanel(self)
 
+        self.last_frame_filepath = [None] * 4
+
     def on_folder_changed(self, folder_name: str):
         """當控制面板的資料夾下拉選單變更時的回呼函式"""
         start_time = time.time()
@@ -593,7 +613,7 @@ class CameraApp(QWidget):
         # need to fix Shane
         today = "AOI_" + time.strftime("%Y%m%d")
         save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back , self.camera_move_worker.current_position_index)
-        self.last_frame = self.snapshot_path(self.current_frame , save_dir)
+        self.last_frame_filepath[self.camera_move_worker.current_position_index] = self.snapshot_path(self.current_frame , save_dir)
         ##
         self.AOI_worker.detect_frame.append(frame.copy())
         self.AOI_worker.wake()
@@ -724,9 +744,7 @@ class CameraApp(QWidget):
         event.accept()
 
     def check_test_fount_back(self,folder_name: str) -> int:
-        #sample_path = os.path.join(self.base_path, self.control_panel.folder_combo.currentText())
         start_time = time.time()
-        
         fount_sample = get_file(self.get_move_folder(folder_name , 0 , 0) , extension='.bmp')
         back_sample = get_file(self.get_move_folder(folder_name , 1 , 0) , extension='.bmp')
         fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
@@ -735,10 +753,22 @@ class CameraApp(QWidget):
         print(f"check_test_fount_back time = {end_time - start_time} s , {fount_back}")
         return fount_back
 
+    def reset_aoi_value(self):
+        self.show_detect_result_frame_flag = True
+        self.show_detect_result_index += 1
+        self.image_label.zoom_scale = 1.0
+
+        threshold = self.control_panel.threshold_spin.value()
+        n_erode = self.control_panel.erode_spin.value()
+        n_dilate = self.control_panel.dilate_spin.value()
+        min_samples = self.control_panel.min_samples_spin.value()
+        self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.control_panel.close()  # 新增：關閉 ControlPanel
             self.close()
+        
         elif event.key() == Qt.Key_P:  # 新增：按下 P 鍵叫出 panel 並顯示在最上層
             self.control_panel.show()
             self.control_panel.raise_()
@@ -752,19 +782,14 @@ class CameraApp(QWidget):
                 self.message_box.emit("沒有樣本", f"{self.current_folder} 沒有樣本", 3000)
                 return
             
-            self.show_detect_result_frame_flag = True
-
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
             self.AOI_worker.detect_index = 0 
             self.AOI_worker.detect_max_index = 4
             self.AOI_worker.fount_back = self.fount_back 
 
-            threshold = self.control_panel.threshold_spin.value()
-            n_erode = self.control_panel.erode_spin.value()
-            n_dilate = self.control_panel.dilate_spin.value()
-            min_samples = self.control_panel.min_samples_spin.value()
-            self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+            self.reset_aoi_value()
+
             self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
             self.camera_move_worker.wake()
 
@@ -785,48 +810,36 @@ class CameraApp(QWidget):
             self.AOI_worker.detect_index = self.camera_move_worker.current_position_index
             self.AOI_worker.fount_back = self.fount_back 
 
-            self.show_detect_result_frame_flag = True
-        
-            threshold = self.control_panel.threshold_spin.value()
-            n_erode = self.control_panel.erode_spin.value()
-            n_dilate = self.control_panel.dilate_spin.value()
-            min_samples = self.control_panel.min_samples_spin.value()
-            self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+            self.reset_aoi_value()
 
             self.AOI_worker.match(self.camera_move_worker.current_position_index)
             self.show_detect_result_index = self.camera_move_worker.current_position_index
             self.match_done_to_show_image(self.show_detect_result_index)
-            #self.show_message_box("", f"neet to fix by Shane", 3000)
-            #n = self.AOI_worker.detect_result[self.camera_move_worker.current_position_index][1]
-            #if n > 0:
-            #    self.message_box.emit("檢測瑕疵", f"有瑕疵: {n} 個", -1)
-            #else:
-            #    self.message_box.emit("檢測瑕疵", f"PASS", -1)
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
-            folder = os.path.join(self.base_path, folder_path)
-            folder = self.get_move_folder(folder , self.fount_back , self.camera_move_worker.current_position_index)
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
             os.makedirs(folder, exist_ok=True)
-            if not hasattr(self, 'last_frame') or self.last_frame is None:
+            if self.last_frame_filepath[self.show_detect_result_index] is None:
                 return
-            filename = os.path.basename(self.last_frame)
+            
+            filename = os.path.basename(self.last_frame_filepath[self.show_detect_result_index])
             new_path = os.path.join(folder, filename)
-            shutil.copy(self.last_frame, new_path)
+            shutil.copy(self.last_frame_filepath[self.show_detect_result_index], new_path)
             message_text = f"已新增正樣本圖片到 {new_path}"
             self.message_box.emit("新增正樣本", message_text, 3000)
-            self.set_sample()
 
+            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.AOI_worker.detect_max_index + self.show_detect_result_index
+            self.AOI_worker.goldens[goldens_index], _ = self.AOI_worker.sample_load(folder)
         elif event.key() == Qt.Key_F2: # F2 負樣本
             folder_path = "nagetive_samples"
-            folder = os.path.join(self.base_path, folder_path)
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
             os.makedirs(folder, exist_ok=True)
-            if not hasattr(self, 'last_frame') or self.last_frame is None:
+            if self.last_frame_filepath[self.show_detect_result_index] is None:
                 return
-            filename = os.path.basename(self.last_frame)
+            filename = os.path.basename(self.last_frame_filepath[self.show_detect_result_index])
             new_path = os.path.join(folder, filename)
-            shutil.copy(self.last_frame, new_path)
-
+            shutil.copy(self.last_frame_filepath[self.show_detect_result_index], new_path)
             folder = f"已保存未檢測到瑕疵圖片 {new_path}"
             self.message_box.emit("未檢測到", folder, 3000)
         
@@ -849,6 +862,8 @@ class CameraApp(QWidget):
         elif event.key() == Qt.Key_Left:
             self.display_video = False
             self.show_detect_result_index -= 1
+            self.image_label.zoom_scale = 1.0
+            self.image_label.zoom_center = None
             if self.show_detect_result_index < 0 :
                 self.show_detect_result_index = len(self.AOI_worker.detect_result) - 1
             self.match_done_to_show_image(self.show_detect_result_index)
@@ -856,6 +871,8 @@ class CameraApp(QWidget):
         elif event.key() == Qt.Key_Right:
             self.display_video = False
             self.show_detect_result_index += 1
+            self.image_label.zoom_scale = 1.0
+            self.image_label.zoom_center = None
             if self.show_detect_result_index >= len(self.AOI_worker.detect_result) :
                 self.show_detect_result_index = 0
             self.match_done_to_show_image(self.show_detect_result_index)
@@ -874,6 +891,7 @@ class CameraApp(QWidget):
     def match_done_to_show_image(self,index):
         if self.AOI_worker.detect_result[index][0] is None:
             return
+
         if self.show_detect_result_frame_flag:
             self.show_image(self.AOI_worker.detect_result[index][0])
             n = self.AOI_worker.detect_result[index][1]
@@ -882,10 +900,8 @@ class CameraApp(QWidget):
             else:
                 self.message_box.emit("檢測瑕疵", f"有瑕疵: {n} 個", -1)
         else:
-            print("self.AOI_worker.aoi_rect[index] = " , self.AOI_worker.aoi_rect[index])
             t, b, l, r = self.AOI_worker.aoi_rect[index]
             self.show_image(self.AOI_worker.detect_frame[index][t:b,l:r])
-
 
     @pyqtSlot(str, str, int)
     def show_message_box(self, title, text, close_time=5000):
