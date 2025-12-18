@@ -106,8 +106,6 @@ class LT300HControl(SerialDevice):
                 break
             
             time.sleep(0.1)
-        
-        print(f"move to {time.time() - start_time} s")
 
         if self._checking:
             print("⚠️ 超時：未在指定時間內到達目標位置")

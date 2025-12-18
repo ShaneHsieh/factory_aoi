@@ -65,7 +65,7 @@ class cv_aoi:
             #front_valid = not np.isnan(avg_front) and avg_front > 2
             #back_valid = not np.isnan(avg_back) and avg_back > 2
 
-            print(f"avg_front {avg_front} , avg_back {avg_back} avg_front > avg_back {(not np.isnan(avg_front) and not np.isnan(avg_back)) and (avg_front > avg_back)}")
+            #print(f"avg_front {avg_front} , avg_back {avg_back} avg_front > avg_back {(not np.isnan(avg_front) and not np.isnan(avg_back)) and (avg_front > avg_back)}")
 
             if np.isnan(avg_back) and np.isnan(avg_front):
                 return -1

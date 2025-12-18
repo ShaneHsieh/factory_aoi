@@ -34,7 +34,7 @@ class ControlPanel(QWidget):
         self.set_sample_btn = QPushButton("設定檢測樣本")
         self.set_sample_btn.setFont(ui_font)
         self.set_sample_btn.setFixedWidth(260)
-        self.set_sample_btn.clicked.connect(self.camera_app.set_sample)
+        #self.set_sample_btn.clicked.connect(self.camera_app.set_sample)
         hbox = QHBoxLayout()
         hbox.addWidget(label_select_folder)
         hbox.addWidget(self.folder_combo)
