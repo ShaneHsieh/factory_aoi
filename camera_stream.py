@@ -864,6 +864,7 @@ class CameraApp(QWidget):
             self.show_detect_result_index -= 1
             self.image_label.zoom_scale = 1.0
             self.image_label.zoom_center = None
+            self.show_detect_result_frame_flag = True
             if self.show_detect_result_index < 0 :
                 self.show_detect_result_index = len(self.AOI_worker.detect_result) - 1
             self.match_done_to_show_image(self.show_detect_result_index)
@@ -873,6 +874,7 @@ class CameraApp(QWidget):
             self.show_detect_result_index += 1
             self.image_label.zoom_scale = 1.0
             self.image_label.zoom_center = None
+            self.show_detect_result_frame_flag = True
             if self.show_detect_result_index >= len(self.AOI_worker.detect_result) :
                 self.show_detect_result_index = 0
             self.match_done_to_show_image(self.show_detect_result_index)
