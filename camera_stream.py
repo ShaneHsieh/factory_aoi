@@ -51,6 +51,10 @@ class AOILabel(QLabel):
         self.zoom_center = None  # (x, y) in image coordinates
         self.left = 0
         self.top = 0
+        # 新增：平移狀態
+        self.panning = False
+        self.pan_start_pos = None
+
 
     def resizeEvent(self, event):
         self.label_width = self.width()   # 更新 label 寬度
@@ -69,48 +73,69 @@ class AOILabel(QLabel):
         # 呼叫 zoom_at
         self.zoom_at(x, y, delta)
         self.update()
-        # 不呼叫 super().wheelEvent(event) 以避免父類預設行為
+
     def zoom_at(self, x, y, delta):
         if self._pixmap is None:
             return
+    
+        # 1. 將 widget 座標轉換為原始圖片座標
+        img_x, img_y = self.widget_to_image_coords(x, y)
+        if img_x is None:
+            return
+    
+        # 2. 計算新縮放比例
+        factor = 1.25 if delta > 0 else 0.8
+        new_scale = self.zoom_scale * factor
+        new_scale = max(1.0, min(new_scale, 20.0))
+    
+        if new_scale == self.zoom_scale:
+            return
+    
+        # 3. 更新 left/top，讓滑鼠指向的點在縮放後位置不變
+        if new_scale > 1.0:
+            # 新的 left/top = 點的座標 - (點到邊界的距離 / 新縮放比例)
+            self.left = int(img_x - (x / self.width()) * (self._pixmap.width() / new_scale))
+            self.top = int(img_y - (y / self.height()) * (self._pixmap.height() / new_scale))
+        else:
+            # 回到初始狀態
+            self.left = 0
+            self.top = 0
+    
+        self.zoom_scale = new_scale
+        self.update()
 
-        # 1. 計算滑鼠在原始圖片上的座標
+    def widget_to_image_coords(self, x, y):
+        """將 widget 上的點 (x, y) 轉換為原始圖片的座標"""
+        if self._pixmap is None:
+            return None, None
+    
         widget_w, widget_h = self.width(), self.height()
-        pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-        
-        # 計算顯示的 pixmap 尺寸與偏移
-        scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
-        scaled_w, scaled_h = int(pixmap_w * scale), int(pixmap_h * scale)
+        original_pixmap_w, original_pixmap_h = self._pixmap.width(), self._pixmap.height()
+
+        # 計算當前顯示的 pixmap 尺寸（考慮了 zoom_scale）
+        current_pixmap_w = original_pixmap_w / self.zoom_scale
+        current_pixmap_h = original_pixmap_h / self.zoom_scale
+
+        # 計算該 pixmap 在 widget 中為了保持長寬比而縮放後的尺寸和偏移
+        scale = min(widget_w / current_pixmap_w, widget_h / current_pixmap_h)
+        scaled_w = int(current_pixmap_w * scale)
+        scaled_h = int(current_pixmap_h * scale)
         offset_x = (widget_w - scaled_w) // 2
         offset_y = (widget_h - scaled_h) // 2
-        
-        # 轉換 widget 座標到 scaled_pixmap 座標
+
+        # 如果點擊在黑邊上，則不進行任何操作
+        if not (offset_x <= x < offset_x + scaled_w and offset_y <= y < offset_y + scaled_h):
+            return None, None
+
+        # 將 widget 座標轉換為相對於 scaled_pixmap 的座標
         scaled_x = x - offset_x
         scaled_y = y - offset_y
-        
-        # 轉換 scaled_pixmap 座標到原始 pixmap 座標
-        if self.zoom_scale == 1.0:
-            img_x = scaled_x / scale
-            img_y = scaled_y / scale
-        else:
-            crop_w_old = pixmap_w / self.zoom_scale
-            crop_h_old = pixmap_h / self.zoom_scale
-            img_x = self.left + (scaled_x / widget_w) * crop_w_old
-            img_y = self.top + (scaled_y / widget_h) * crop_h_old
-        
-        # 2. 計算新縮放比例
-        # delta > 0 放大, < 0 縮小
-        new_scale = self.zoom_scale + 0.25 if delta > 0 else self.zoom_scale - 0.25
-        new_scale = max(1.0, min(new_scale, 20.0)) 
-        
-        # 3. 更新縮放狀態
-        self.zoom_scale = new_scale
-        if self.zoom_scale > 1.0:
-            self.zoom_center = (img_x, img_y)
-        else:
-            self.zoom_center = None # 回到初始狀態
-        
-        #print(f"zoom_at image coord: ({img_x:.2f}, {img_y:.2f}), new_scale: {new_scale}")
+
+        # 將 scaled_pixmap 座標轉換為原始圖片座標
+        img_x = self.left + (scaled_x / scaled_w) * current_pixmap_w
+        img_y = self.top + (scaled_y / scaled_h) * current_pixmap_h
+        return img_x, img_y
+
 
     def paintEvent(self, event):
         from PyQt5.QtGui import QPainter
@@ -119,25 +144,15 @@ class AOILabel(QLabel):
         if self._pixmap:
             widget_w, widget_h = self.width(), self.height()
             pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-             
-            if self.zoom_scale > 1.0 and self.zoom_center is not None:
+            
+            if self.zoom_scale > 1.0:
                 # --- 縮放模式 ---
-                img_x, img_y = self.zoom_center
-                
                 crop_w = int(pixmap_w / self.zoom_scale)
                 crop_h = int(pixmap_h / self.zoom_scale)
-                
-                # 計算裁切框左上角，讓 img_x, img_y 保持在滑鼠位置
-                # 這部分有點複雜，因為要考慮滑鼠在 widget 上的相對位置
-                # 簡化處理：以 zoom_center 為中心進行裁切
-                self.left = max(0, int(img_x - crop_w / 2))
-                self.top = max(0, int(img_y - crop_h / 2))
-                
+    
                 # 確保裁切框不超過圖片邊界
-                if self.left + crop_w > pixmap_w:
-                    self.left = pixmap_w - crop_w
-                if self.top + crop_h > pixmap_h:
-                    self.top = pixmap_h - crop_h
+                self.left = max(0, min(self.left, pixmap_w - crop_w))
+                self.top = max(0, min(self.top, pixmap_h - crop_h))
                 
                 # 再次確保 left/top 不為負
                 self.left = max(0, self.left)
@@ -150,11 +165,10 @@ class AOILabel(QLabel):
                 x = (widget_w - scaled_pixmap.width()) // 2
                 y = (widget_h - scaled_pixmap.height()) // 2
                 painter.drawPixmap(x, y, scaled_pixmap)
-
             else:
                 # --- 正常顯示模式 ---
                 self.zoom_scale = 1.0
-                self.zoom_center = None
+                #self.zoom_center = None
                 self.left = 0
                 self.top = 0
                 scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
@@ -163,14 +177,42 @@ class AOILabel(QLabel):
                 x = (widget_w - scaled_pixmap.width()) // 2
                 y = (widget_h - scaled_pixmap.height()) // 2
                 painter.drawPixmap(x, y, scaled_pixmap)
-        # 不要呼叫 super().paintEvent(event)，避免 QLabel 預設繪圖覆蓋
 
     def mousePressEvent(self, event):
-        if event.button() == 1: 
-            None
-        elif event.button() == 2:
-            None
-        super().mousePressEvent(event)
+        if event.button() == Qt.RightButton and self.zoom_scale > 1.0:
+            self.panning = True
+            self.pan_start_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.panning and self.pan_start_pos is not None:
+            delta = event.pos() - self.pan_start_pos
+            
+            # 將 widget 上的移動量轉換為原始圖片上的移動量
+            if self._pixmap:
+                pixmap_w = self._pixmap.width()
+                pixmap_h = self._pixmap.height()
+                
+                scale_x = (pixmap_w / self.zoom_scale) / self.width()
+                scale_y = (pixmap_h / self.zoom_scale) / self.height()
+                
+                self.left -= delta.x() * scale_x
+                self.top -= delta.y() * scale_y
+                
+                self.pan_start_pos = event.pos()
+                self.update()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self.panning = False
+            self.pan_start_pos = None
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            super().mouseReleaseEvent(event)
 
 class AOIMatchWorker(QObject):
     match_done = pyqtSignal()
@@ -891,6 +933,8 @@ class CameraApp(QWidget):
         self.match_done_to_show_image(self.show_detect_result_index)
         
     def match_done_to_show_image(self,index):
+        if index > len(self.AOI_worker.detect_result) - 1:
+            return
         if self.AOI_worker.detect_result[index][0] is None:
             return
 
