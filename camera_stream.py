@@ -11,11 +11,12 @@ from match_template import cv_aoi
 from control_panel import ControlPanel
 from LT_300H_control import LT300HControl 
 from find_contour import FindContour
+from aoi_label import AOILabel
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
 )
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtCore import QTimer, pyqtSignal, pyqtSlot, QPoint, Qt, QObject, QThread, QWaitCondition, QMutex
 from PyQt5.QtWidgets import QMessageBox
 from pygrabber.dshow_graph import FilterGraph
@@ -33,186 +34,6 @@ def get_file(folder_path, extension='.bmp'):
                 if os.path.isfile(os.path.join(folder_path, f)) and any(f.lower().endswith(ext) for ext in extensions)]
     else:
         return []
-
-class AOILabel(QLabel):
-    aoi_rect_changed = pyqtSignal(object)  # 新增 AOI 區域變更訊號
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._pixmap = None
-        self.setStyleSheet("background-color: black;")
-        self.setAlignment(Qt.AlignCenter) 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 label 填滿空間
-        self.label_width = self.width()   # 新增：儲存 label 寬度
-        self.label_height = self.height() # 新增：儲存 label 高度
-        self.video_width = 2560  # 預設值，CameraApp 會設置
-        self.video_height = 1440
-        # 新增 zoom 狀態
-        self.zoom_scale = 1.0
-        self.zoom_center = None  # (x, y) in image coordinates
-        self.left = 0
-        self.top = 0
-        # 新增：平移狀態
-        self.panning = False
-        self.pan_start_pos = None
-
-
-    def resizeEvent(self, event):
-        self.label_width = self.width()   # 更新 label 寬度
-        self.label_height = self.height() # 更新 label 高度
-        super().resizeEvent(event)
-
-    def setPixmap(self, pixmap):
-        self._pixmap = pixmap
-        self.update()
-
-    def wheelEvent(self, event):
-        pos = event.position() if hasattr(event, "position") else event.pos()
-        x, y = int(pos.x()), int(pos.y())
-        delta = event.angleDelta().y()
-        #print(f"wheelEvent {x} , {y} {delta}")
-        # 呼叫 zoom_at
-        self.zoom_at(x, y, delta)
-        self.update()
-
-    def zoom_at(self, x, y, delta):
-        if self._pixmap is None:
-            return
-    
-        # 1. 將 widget 座標轉換為原始圖片座標
-        img_x, img_y = self.widget_to_image_coords(x, y)
-        if img_x is None:
-            return
-    
-        # 2. 計算新縮放比例
-        factor = 1.25 if delta > 0 else 0.8
-        new_scale = self.zoom_scale * factor
-        new_scale = max(1.0, min(new_scale, 20.0))
-    
-        if new_scale == self.zoom_scale:
-            return
-    
-        # 3. 更新 left/top，讓滑鼠指向的點在縮放後位置不變
-        if new_scale > 1.0:
-            # 新的 left/top = 點的座標 - (點到邊界的距離 / 新縮放比例)
-            self.left = int(img_x - (x / self.width()) * (self._pixmap.width() / new_scale))
-            self.top = int(img_y - (y / self.height()) * (self._pixmap.height() / new_scale))
-        else:
-            # 回到初始狀態
-            self.left = 0
-            self.top = 0
-    
-        self.zoom_scale = new_scale
-        self.update()
-
-    def widget_to_image_coords(self, x, y):
-        """將 widget 上的點 (x, y) 轉換為原始圖片的座標"""
-        if self._pixmap is None:
-            return None, None
-    
-        widget_w, widget_h = self.width(), self.height()
-        original_pixmap_w, original_pixmap_h = self._pixmap.width(), self._pixmap.height()
-
-        # 計算當前顯示的 pixmap 尺寸（考慮了 zoom_scale）
-        current_pixmap_w = original_pixmap_w / self.zoom_scale
-        current_pixmap_h = original_pixmap_h / self.zoom_scale
-
-        # 計算該 pixmap 在 widget 中為了保持長寬比而縮放後的尺寸和偏移
-        scale = min(widget_w / current_pixmap_w, widget_h / current_pixmap_h)
-        scaled_w = int(current_pixmap_w * scale)
-        scaled_h = int(current_pixmap_h * scale)
-        offset_x = (widget_w - scaled_w) // 2
-        offset_y = (widget_h - scaled_h) // 2
-
-        # 如果點擊在黑邊上，則不進行任何操作
-        if not (offset_x <= x < offset_x + scaled_w and offset_y <= y < offset_y + scaled_h):
-            return None, None
-
-        # 將 widget 座標轉換為相對於 scaled_pixmap 的座標
-        scaled_x = x - offset_x
-        scaled_y = y - offset_y
-
-        # 將 scaled_pixmap 座標轉換為原始圖片座標
-        img_x = self.left + (scaled_x / scaled_w) * current_pixmap_w
-        img_y = self.top + (scaled_y / scaled_h) * current_pixmap_h
-        return img_x, img_y
-
-
-    def paintEvent(self, event):
-        from PyQt5.QtGui import QPainter
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), Qt.black)
-        if self._pixmap:
-            widget_w, widget_h = self.width(), self.height()
-            pixmap_w, pixmap_h = self._pixmap.width(), self._pixmap.height()
-            
-            if self.zoom_scale > 1.0:
-                # --- 縮放模式 ---
-                crop_w = int(pixmap_w / self.zoom_scale)
-                crop_h = int(pixmap_h / self.zoom_scale)
-    
-                # 確保裁切框不超過圖片邊界
-                self.left = max(0, min(self.left, pixmap_w - crop_w))
-                self.top = max(0, min(self.top, pixmap_h - crop_h))
-                
-                # 再次確保 left/top 不為負
-                self.left = max(0, self.left)
-                self.top = max(0, self.top)
-
-                cropped = self._pixmap.copy(self.left, self.top, crop_w, crop_h)
-                scaled_pixmap = cropped.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                
-                # 繪製時置中 (如果 scaled_pixmap 沒有填滿 widget)
-                x = (widget_w - scaled_pixmap.width()) // 2
-                y = (widget_h - scaled_pixmap.height()) // 2
-                painter.drawPixmap(x, y, scaled_pixmap)
-            else:
-                # --- 正常顯示模式 ---
-                self.zoom_scale = 1.0
-                #self.zoom_center = None
-                self.left = 0
-                self.top = 0
-                scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
-                new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
-                scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                x = (widget_w - scaled_pixmap.width()) // 2
-                y = (widget_h - scaled_pixmap.height()) // 2
-                painter.drawPixmap(x, y, scaled_pixmap)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.RightButton and self.zoom_scale > 1.0:
-            self.panning = True
-            self.pan_start_pos = event.pos()
-            self.setCursor(Qt.ClosedHandCursor)
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self.panning and self.pan_start_pos is not None:
-            delta = event.pos() - self.pan_start_pos
-            
-            # 將 widget 上的移動量轉換為原始圖片上的移動量
-            if self._pixmap:
-                pixmap_w = self._pixmap.width()
-                pixmap_h = self._pixmap.height()
-                
-                scale_x = (pixmap_w / self.zoom_scale) / self.width()
-                scale_y = (pixmap_h / self.zoom_scale) / self.height()
-                
-                self.left -= delta.x() * scale_x
-                self.top -= delta.y() * scale_y
-                
-                self.pan_start_pos = event.pos()
-                self.update()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self.panning = False
-            self.pan_start_pos = None
-            self.setCursor(Qt.ArrowCursor)
-        else:
-            super().mouseReleaseEvent(event)
 
 class AOIMatchWorker(QObject):
     match_done = pyqtSignal()
@@ -236,7 +57,7 @@ class AOIMatchWorker(QObject):
         self.detect_frame = []
         self.goldens = []
         self.detect_result = []
-        self.detect_index = 0 
+        self.detect_index = -1
         self.detect_max_index = 4
         self.fount_back = 0
         
@@ -249,11 +70,15 @@ class AOIMatchWorker(QObject):
             self._mutex.unlock()
             if not self._running:
                 break
-            while self.detect_index != self.detect_max_index:
-                if len(self.detect_frame) <= self.detect_index:
-                    time.sleep(0.1)
-                    continue
-                self.match(-1)
+            if self.detect_index == -1 :
+                self.detect_index = 0
+                while self.detect_index != self.detect_max_index:
+                    if len(self.detect_frame) <= self.detect_index:
+                        time.sleep(0.1)
+                        continue
+                    self.match(-1)
+            else:
+                self.match(self.detect_index)
             self.match_done.emit()
 
     def wake(self):
@@ -648,17 +473,24 @@ class CameraApp(QWidget):
         cv2.imwrite(save_path, frame)
         if message == False:
             return save_path
-        self.message_box.emit("拍照完成", f"已儲存於：\n{save_path}")
+        self.message_box.emit("拍照完成", f"已儲存於：\n{save_path}" , -1)
         return save_path
 
     def camera_move_done_callback(self , frame):
-        # need to fix Shane
         today = "AOI_" + time.strftime("%Y%m%d")
         save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back , self.camera_move_worker.current_position_index)
         self.last_frame_filepath[self.camera_move_worker.current_position_index] = self.snapshot_path(self.current_frame , save_dir)
-        ##
         self.AOI_worker.detect_frame.append(frame.copy())
         self.AOI_worker.wake()
+
+    def on_move_done(self):
+        #if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
+        #    return  # 只在回到起點時顯示訊息
+        if self.camera_move_worker.move_camera_get_frame_done_callback == None:
+            self.message_box.emit("拍照完成", "正樣本拍照完成" , -1 )
+        self.display_video = False
+        #elif self.camera_move_worker.move_camera_get_frame_done_callback == self.camera_move_done_callback:
+        #    self.message_box.emit("檢測完成", "PASS" , -1)
 
     def snapshot_positive_image(self):
         """啟動正樣本拍照 (在背景 thread 中執行)
@@ -707,15 +539,6 @@ class CameraApp(QWidget):
 
         self.camera_move_worker.move_camera_get_frame_done_callback = worker_callback
         self.camera_move_worker.wake()
-        
-    def on_move_done(self):
-        """拍照完成時的回調"""
-        #if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
-        #    return  # 只在回到起點時顯示訊息
-        if self.camera_move_worker.move_camera_get_frame_done_callback == None:
-            self.message_box.emit("拍照完成", "正樣本拍照完成")
-        #elif self.camera_move_worker.move_camera_get_frame_done_callback == self.camera_move_done_callback:
-        #    self.message_box.emit("檢測完成", "PASS" , -1)
 
     def detect_and_save_aoi_rect(self, frame, folder_path):
         """
@@ -817,20 +640,21 @@ class CameraApp(QWidget):
             self.control_panel.activateWindow()
 
         elif event.key() == Qt.Key_Enter: #Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
-            self.display_video = True
             self.fount_back = self.check_test_fount_back(self.current_folder)
 
             if self.fount_back < 0 :
                 self.message_box.emit("沒有樣本", f"{self.current_folder} 沒有樣本", 3000)
                 return
             
+            self.display_video = True
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
-            self.AOI_worker.detect_index = 0 
+            self.AOI_worker.detect_index = -1
             self.AOI_worker.detect_max_index = 4
             self.AOI_worker.fount_back = self.fount_back 
 
             self.reset_aoi_value()
+            self.image_label.set_overlay_text("辨識中")
 
             self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
             self.camera_move_worker.wake()
@@ -848,15 +672,22 @@ class CameraApp(QWidget):
                 self.message_box.emit("沒有測試過", f"neet to fix by Shane", 3000)
                 return
 
+            self.display_video = True
             self.AOI_worker.detect_frame[self.camera_move_worker.current_position_index] = self.current_frame.copy()
             self.AOI_worker.detect_index = self.camera_move_worker.current_position_index
             self.AOI_worker.fount_back = self.fount_back 
 
             self.reset_aoi_value()
+            
+            self.image_label.set_overlay_text("辨識中")
 
-            self.AOI_worker.match(self.camera_move_worker.current_position_index)
-            self.show_detect_result_index = self.camera_move_worker.current_position_index
-            self.match_done_to_show_image(self.show_detect_result_index)
+            self.AOI_worker.wake()
+
+            # self.AOI_worker.match(self.camera_move_worker.current_position_index)
+            # self.show_detect_result_index = self.camera_move_worker.current_position_index
+            # self.match_done_to_show_image(self.show_detect_result_index)
+
+            # self.image_label.set_overlay_text("")
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
@@ -883,14 +714,12 @@ class CameraApp(QWidget):
             new_path = os.path.join(folder, filename)
             shutil.copy(self.last_frame_filepath[self.show_detect_result_index], new_path)
             folder = f"已保存未檢測到瑕疵圖片 {new_path}"
-            self.message_box.emit("未檢測到", folder, 3000)
-        
+            self.message_box.emit("未檢測到", folder, 3000)        
         elif event.key() == Qt.Key_V:  # V for show camera video or AOI result
             if self.show_detect_result_frame_flag == False:
                 self.show_detect_result_frame_flag = True
             else:
                 self.show_detect_result_frame_flag = False
-
             self.match_done_to_show_image(self.show_detect_result_index)
 
         elif event.key() == Qt.Key_S:  # V for show camera video or AOI result
@@ -902,21 +731,15 @@ class CameraApp(QWidget):
                 self.match_done_to_show_image(self.show_detect_result_index)
         
         elif event.key() == Qt.Key_Left:
-            self.display_video = False
+            self.reset_display_frame_for_result()
             self.show_detect_result_index -= 1
-            self.image_label.zoom_scale = 1.0
-            self.image_label.zoom_center = None
-            self.show_detect_result_frame_flag = True
             if self.show_detect_result_index < 0 :
                 self.show_detect_result_index = len(self.AOI_worker.detect_result) - 1
             self.match_done_to_show_image(self.show_detect_result_index)
 
         elif event.key() == Qt.Key_Right:
-            self.display_video = False
+            self.reset_display_frame_for_result()
             self.show_detect_result_index += 1
-            self.image_label.zoom_scale = 1.0
-            self.image_label.zoom_center = None
-            self.show_detect_result_frame_flag = True
             if self.show_detect_result_index >= len(self.AOI_worker.detect_result) :
                 self.show_detect_result_index = 0
             self.match_done_to_show_image(self.show_detect_result_index)
@@ -928,16 +751,22 @@ class CameraApp(QWidget):
             super().keyPressEvent(event)
 
     def match_around_done(self):
-        self.display_video = False
+        self.reset_display_frame_for_result()
         self.show_detect_result_index = self.camera_move_worker.current_position_index
         self.match_done_to_show_image(self.show_detect_result_index)
+        self.image_label.set_overlay_text("")
         
+    def reset_display_frame_for_result(self):
+        self.image_label.zoom_scale = 1.0
+        self.image_label.zoom_center = None
+        self.show_detect_result_frame_flag = True
+
     def match_done_to_show_image(self,index):
         if index > len(self.AOI_worker.detect_result) - 1:
             return
         if self.AOI_worker.detect_result[index][0] is None:
             return
-
+        self.display_video = False
         if self.show_detect_result_frame_flag:
             self.show_image(self.AOI_worker.detect_result[index][0])
             n = self.AOI_worker.detect_result[index][1]
@@ -950,7 +779,7 @@ class CameraApp(QWidget):
             self.show_image(self.AOI_worker.detect_frame[index][t:b,l:r])
 
     @pyqtSlot(str, str, int)
-    def show_message_box(self, title, text, close_time=5000):
+    def show_message_box(self, title, text, close_time=5000, font_size=16, box_width=1000, box_height=400):
         if hasattr(self, 'msg') and self.msg is not None:
             self.msg.close()
             self.msg = None
@@ -959,6 +788,15 @@ class CameraApp(QWidget):
         self.msg.setText(text)
         self.msg.setStandardButtons(QMessageBox.Ok)
         self.msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        
+        # 調整文字大小
+        font = QFont()
+        font.setPointSize(font_size)
+        self.msg.setFont(font)
+        
+        # 調整窗口大小
+        self.msg.resize(box_width, box_height)
+        
         self.msg.show()
 
         def close_msg():

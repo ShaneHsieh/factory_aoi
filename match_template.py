@@ -225,7 +225,7 @@ class cv_aoi:
             if i>=0:
                 pp = p[clustering.labels_==i]
                 y,x = np.round(np.mean(pp, 0))
-                res = cv2.circle(res, (int(x),int(y)), int((100*len(pp)/min_samples)**.8), (255, 0, 255), 2)
+                res = cv2.circle(res, (int(x),int(y)), int((100*len(pp)/min_samples)**.8), (255, 0, 255), 4)
             else:
                 n_size = n_size-1
 
