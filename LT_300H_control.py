@@ -136,6 +136,34 @@ class LT300HControl(SerialDevice):
             return True
         return False
 
+    def move_left(self):
+        command = f"H\r\nVX 0\r\nEND\r\n"
+        self.write(command)
+
+    def move_right(self):
+        command = f"H\r\nVX 300\r\nEND\r\n"
+        self.write(command)
+    
+    def move_top(self):
+        command = f"H\r\nVY 0\r\nEND\r\n"
+        self.write(command)
+
+    def move_down(self):
+        command = f"H\r\nVY 300\r\nEND\r\n"
+        self.write(command)
+
+    def move_zoom_in(self):
+        command = f"H\r\nVZ 100\r\nEND\r\n"
+        self.write(command)
+
+    def move_zoom_out(self):
+        command = f"H\r\nVZ 0\r\nEND\r\n"
+        self.write(command)
+    
+    def move_stop(self):
+        command = f"H\r\nST\r\nEND\r\n"
+        self.write(command)
+
 if __name__ == "__main__":
     dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
     time.sleep(2)  # 等待連線穩定 
