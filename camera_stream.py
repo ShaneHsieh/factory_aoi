@@ -227,7 +227,6 @@ class CameraMoveWorker(QObject):
 
         self.move_camera_get_frame_done_callback = None
         self.positive_folder = None
-        self.breakpoint = False
 
     def wake(self):
         self._mutex.lock()
@@ -269,17 +268,15 @@ class CameraMoveWorker(QObject):
                     except TypeError:
                         print(f"move camera callback error: {e}")
 
-                if self.breakpoint == True:
-                    break
                 # 移動到下一個位置（非阻塞），等待裝置到達
                 try:
                     self.move_to_next_position()
                 except Exception as e:
                     print(f"move_to_next_position error: {e}")
 
-                self.move_check_mutex.lock()
-                self.move_check_wait_cond.wait(self.move_check_mutex)
-                self.move_check_mutex.unlock()
+                #self.move_check_mutex.lock()
+                #self.move_check_wait_cond.wait(self.move_check_mutex)
+                #self.move_check_mutex.unlock()
 
                 if (self.LT_300H_dev.cur_x == self.position[0][0] and 
                     self.LT_300H_dev.cur_y == self.position[0][1]):
@@ -321,24 +318,31 @@ class CameraMoveWorker(QObject):
         new_x, new_y = self.position[index]
         return new_x, new_y, self.LT_300H_dev.start_z
 
-    def move_to_next_position(self):
+    def move_to_next_position(self, index=None):
         if not self.position:
             print("⚠️ 位置列表是空的，無法移動。")
             return
 
-        # 取得下一個位置
-        if self.current_position_index < len(self.position) -1 :
-            self.current_position_index += 1
-            new_x, new_y = self.position[self.current_position_index]
+        if index is not None:
+            if 0 <= index < len(self.position):
+                self.current_position_index = index
+                new_x, new_y = self.position[self.current_position_index]
+            else:
+                print(f"⚠️ Index {index} out of range")
+                return
         else:
-            self.current_position_index = 0
-            new_x = self.LT_300H_dev.start_x
-            new_y = self.LT_300H_dev.start_y
+            # 取得下一個位置
+            if self.current_position_index < len(self.position) -1 :
+                self.current_position_index += 1
+                new_x, new_y = self.position[self.current_position_index]
+            else:
+                self.current_position_index = 0
+                new_x = self.LT_300H_dev.start_x
+                new_y = self.LT_300H_dev.start_y
 
         # 回調函數
         def on_position_arrived(context):
             if context == "move_to_next_position":
-                # 使用 self 來存取 CameraMoveWorker 實例
                 self.move_check_wait_cond.wakeOne()
 
         try:
@@ -346,8 +350,14 @@ class CameraMoveWorker(QObject):
             self.LT_300H_dev.move_to(new_x, new_y, self.LT_300H_dev.start_z, 
                                      callback=lambda ctx: on_position_arrived(ctx),
                                      context="move_to_next_position")
+            self.move_check_mutex.lock()
+            self.move_check_wait_cond.wait(self.move_check_mutex)
+            self.move_check_mutex.unlock()
+
         except Exception as e:
             print(f"move_to_next_position failed: {e}")
+
+
 
     def close_device(self):
         self.LT_300H_dev.close()
@@ -589,6 +599,50 @@ class CameraApp(QWidget):
             print(f"detect_and_save_aoi_rect error: {e}")
             self.aoi_rect = [21, 2160 - 21, 38, 3840 - 38]
 
+    def snapshot_current_view(self):
+        """保存目前顯示的畫面 (F3)，包含縮放裁切"""
+        if not hasattr(self, 'image_label') or self.image_label._pixmap is None:
+            self.message_box.emit("截圖失敗", "目前沒有畫面可供儲存", 1000)
+            return
+
+        try:
+            # 取得目前的 pixmap
+            pixmap = self.image_label._pixmap
+            scale = self.image_label.zoom_scale
+            
+            image_to_save = None
+            
+            if scale > 1.0:
+                # 參照 AOILabel.paintEvent 的邏輯
+                w = pixmap.width()
+                h = pixmap.height()
+                crop_w = int(w / scale)
+                crop_h = int(h / scale)
+                
+                left = int(max(0, min(self.image_label.left, w - crop_w)))
+                top = int(max(0, min(self.image_label.top, h - crop_h)))
+                
+                image_to_save = pixmap.copy(left, top, crop_w, crop_h)
+            else:
+                image_to_save = pixmap
+            
+            if image_to_save:
+                desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+                today = time.strftime("%Y-%m-%d")
+                folder_path = os.path.join(desktop_path, today)
+                os.makedirs(folder_path, exist_ok=True)
+                
+                timestamp = time.strftime("%H%M%S")
+                filename = f"snapshot_zoom_{timestamp}.bmp"
+                save_path = os.path.join(folder_path, filename)
+                
+                image_to_save.save(save_path, "BMP")
+                self.message_box.emit("截圖完成", f"已儲存於：\n{save_path}", 2000)
+                
+        except Exception as e:
+            print(f"Snapshot error: {e}")
+            self.message_box.emit("截圖失敗", f"儲存失敗: {e}", 3000)
+
     def closeEvent(self, event):
         # 停止 CameraMoveWorker 並關閉其設備
         if hasattr(self, 'camera_move_worker'):
@@ -647,6 +701,8 @@ class CameraApp(QWidget):
                 return
             
             self.display_video = True
+            self.camera_move_worker.move_to_next_position(0)
+
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
             self.AOI_worker.detect_index = -1
@@ -673,8 +729,10 @@ class CameraApp(QWidget):
                 return
 
             self.display_video = True
-            self.AOI_worker.detect_frame[self.camera_move_worker.current_position_index] = self.current_frame.copy()
-            self.AOI_worker.detect_index = self.camera_move_worker.current_position_index
+            self.camera_move_worker.move_to_next_position(self.show_detect_result_index)
+            
+            self.AOI_worker.detect_frame[self.show_detect_result_index] = self.current_frame.copy()
+            self.AOI_worker.detect_index = self.show_detect_result_index
             self.AOI_worker.fount_back = self.fount_back 
 
             self.reset_aoi_value()
@@ -714,7 +772,9 @@ class CameraApp(QWidget):
             new_path = os.path.join(folder, filename)
             shutil.copy(self.last_frame_filepath[self.show_detect_result_index], new_path)
             folder = f"已保存未檢測到瑕疵圖片 {new_path}"
-            self.message_box.emit("未檢測到", folder, 3000)        
+            self.message_box.emit("未檢測到", folder, 3000)
+        elif event.key() == Qt.Key_F3: # F3 截圖
+            self.snapshot_current_view()
         elif event.key() == Qt.Key_V:  # V for show camera video or AOI result
             if self.show_detect_result_frame_flag == False:
                 self.show_detect_result_frame_flag = True
@@ -777,6 +837,7 @@ class CameraApp(QWidget):
         else:
             t, b, l, r = self.AOI_worker.aoi_rect[index]
             self.show_image(self.AOI_worker.detect_frame[index][t:b,l:r])
+        self.match_done_to_show_image(f"角度 {index+1}")
 
     @pyqtSlot(str, str, int)
     def show_message_box(self, title, text, close_time=5000, font_size=16, box_width=1000, box_height=400):
