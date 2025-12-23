@@ -215,6 +215,7 @@ class CameraMoveWorker(QObject):
         self.position = self.calculate_all_position()
         
         self.current_position_index = 0
+        self.multi_position_flag = True
 
         self.camera_app = camera_app
         self._running = True
@@ -249,74 +250,39 @@ class CameraMoveWorker(QObject):
             self._wait_cond.wait(self._mutex)
             self._mutex.unlock()
 
+            if self.multi_position_flag:
+                self.move_to_next_position(0)
+
             while self.start_move:
-                frame_copy = None
-                if self.camera_app.current_frame is not None:
+                if self.multi_position_flag:
+                    # 如果有外部指定 move_camera_get_frame_done_callback ，直接在 worker 執行
+                    frame_copy = self.copy_frame()
+                    if callable(self.move_camera_get_frame_done_callback):
+                        try:
+                            self.move_camera_get_frame_done_callback(frame_copy , -1 )
+                        except TypeError:
+                            print(f"move camera callback error: {e}")
+
+                        try:
+                            self.move_to_next_position()
+                        except Exception as e:
+                            print(f"move_to_next_position error: {e}")
+
+                        if (self.LT_300H_dev.cur_x == self.position[0][0] and 
+                            self.LT_300H_dev.cur_y == self.position[0][1]):
+                            self.start_move = False
+                else:
                     try:
-                        frame_copy = self.camera_app.current_frame.copy()
-                    except Exception:
-                        frame_copy = None
+                        self.move_to_next_position(self.current_position_index)
+                        frame_copy = self.copy_frame()
+                        self.move_camera_get_frame_done_callback(frame_copy , self.current_position_index)
+                        self.start_move = False
+                    except Exception as e:
+                        print(f"move_to_next_position error: {e}")
 
-                if frame_copy is None or frame_copy.max() == 0:
-                    time.sleep(0.05)
-                    continue
-                
-                # 如果有外部指定 move_camera_get_frame_done_callback ，直接在 worker 執行
-                if callable(self.move_camera_get_frame_done_callback):
-                    try:
-                        self.move_camera_get_frame_done_callback(frame_copy)
-                    except TypeError:
-                        print(f"move camera callback error: {e}")
-
-                # 移動到下一個位置（非阻塞），等待裝置到達
-                try:
-                    self.move_to_next_position()
-                except Exception as e:
-                    print(f"move_to_next_position error: {e}")
-
-                #self.move_check_mutex.lock()
-                #self.move_check_wait_cond.wait(self.move_check_mutex)
-                #self.move_check_mutex.unlock()
-
-                if (self.LT_300H_dev.cur_x == self.position[0][0] and 
-                    self.LT_300H_dev.cur_y == self.position[0][1]):
-                    self.start_move = False
                 time.sleep(1)  # 避免 CPU 佔用過高
 
             self.camera_move_done.emit()
-
-    def calculate_all_position(self):
-        """計算從 start_position 到 max_limit_position 的所有掃描位置。"""
-        positions = []
-        if not self.LT_300H_dev:
-            return positions
-
-        start_x = self.LT_300H_dev.start_x
-        start_y = self.LT_300H_dev.start_y
-        limit_x_min, limit_x_max = self.LT_300H_dev.limit_x
-        limit_y_min, limit_y_max = self.LT_300H_dev.limit_y
-
-        cur_x = start_x
-        cur_y = start_y
-        x_dir = 1  # 1 for right, -1 for left
-
-        while cur_y <= limit_y_max:
-            positions.append((cur_x, cur_y))
-            next_x = cur_x + (x_dir * self.step_x)
-
-            if limit_x_min <= next_x <= limit_x_max:
-                cur_x = next_x
-            else:
-                cur_y += self.step_y
-                x_dir *= -1 # Reverse direction
-                if cur_y > limit_y_max:
-                    break
-        
-        return positions
-
-    def get_position(self , index):
-        new_x, new_y = self.position[index]
-        return new_x, new_y, self.LT_300H_dev.start_z
 
     def move_to_next_position(self, index=None):
         if not self.position:
@@ -357,7 +323,54 @@ class CameraMoveWorker(QObject):
         except Exception as e:
             print(f"move_to_next_position failed: {e}")
 
+    def copy_frame(self):
+        frame_copy = None
+        while True:
+            if self.camera_app.current_frame is not None:
+                try:
+                    frame_copy = self.camera_app.current_frame.copy()
+                    break
+                except Exception:
+                    frame_copy = None
 
+            if frame_copy is None or frame_copy.max() == 0:
+                time.sleep(0.05)
+                continue
+        
+        return frame_copy
+
+    def calculate_all_position(self):
+        """計算從 start_position 到 max_limit_position 的所有掃描位置。"""
+        positions = []
+        if not self.LT_300H_dev:
+            return positions
+
+        start_x = self.LT_300H_dev.start_x
+        start_y = self.LT_300H_dev.start_y
+        limit_x_min, limit_x_max = self.LT_300H_dev.limit_x
+        limit_y_min, limit_y_max = self.LT_300H_dev.limit_y
+
+        cur_x = start_x
+        cur_y = start_y
+        x_dir = 1  # 1 for right, -1 for left
+
+        while cur_y <= limit_y_max:
+            positions.append((cur_x, cur_y))
+            next_x = cur_x + (x_dir * self.step_x)
+
+            if limit_x_min <= next_x <= limit_x_max:
+                cur_x = next_x
+            else:
+                cur_y += self.step_y
+                x_dir *= -1 # Reverse direction
+                if cur_y > limit_y_max:
+                    break
+        
+        return positions
+
+    def get_position(self , index):
+        new_x, new_y = self.position[index]
+        return new_x, new_y, self.LT_300H_dev.start_z
 
     def close_device(self):
         self.LT_300H_dev.close()
@@ -381,7 +394,6 @@ class CameraApp(QWidget):
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 讓 image_label 填滿
         self.image_label.video_width = self.video_width  # 傳遞給 AOILabel
         self.image_label.video_height = self.video_height
-        self.image_label.aoi_rect_changed.connect(self.on_aoi_rect_changed)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)  # 讓 layout 沒有邊框
         layout.addWidget(self.image_label)
@@ -442,9 +454,6 @@ class CameraApp(QWidget):
         print(f"選擇的樣本資料夾已變更為: {self.current_folder} , time = {end_time-start_time}")
         self.message_box.emit("設定正樣本", f"正樣本已設定\n{self.current_folder}" , 3000)
 
-    def on_aoi_rect_changed(self, rect):
-        self.aoi_rect = rect
-
     def show_image(self, display_image):
         if display_image is None:
             print("display_image is None")
@@ -486,11 +495,17 @@ class CameraApp(QWidget):
         self.message_box.emit("拍照完成", f"已儲存於：\n{save_path}" , -1)
         return save_path
 
-    def camera_move_done_callback(self , frame):
+    def camera_move_done_callback(self ,frame , index):
         today = "AOI_" + time.strftime("%Y%m%d")
         save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back , self.camera_move_worker.current_position_index)
-        self.last_frame_filepath[self.camera_move_worker.current_position_index] = self.snapshot_path(self.current_frame , save_dir)
-        self.AOI_worker.detect_frame.append(frame.copy())
+        self.last_frame_filepath[self.camera_move_worker.current_position_index] = self.snapshot_path(frame , save_dir)
+        if index == -1:
+            self.AOI_worker.detect_frame.append(frame.copy())
+        else:
+            if len(self.AOI_worker.detect_frame) <= index:
+                print(f"index {index} out of range for AOI_worker.detect_frame")
+                return
+            self.AOI_worker.detect_frame[index] = frame.copy()
         self.AOI_worker.wake()
 
     def on_move_done(self):
@@ -664,8 +679,8 @@ class CameraApp(QWidget):
 
     def check_test_fount_back(self,folder_name: str) -> int:
         start_time = time.time()
-        fount_sample = get_file(self.get_move_folder(folder_name , 0 , 0) , extension='.bmp')
-        back_sample = get_file(self.get_move_folder(folder_name , 1 , 0) , extension='.bmp')
+        fount_sample = get_file(self.get_move_folder(folder_name , 0 , self.camera_move_worker.current_position_index) , extension='.bmp')
+        back_sample = get_file(self.get_move_folder(folder_name , 1 , self.camera_move_worker.current_position_index) , extension='.bmp')
         fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
 
         end_time = time.time()
@@ -682,6 +697,7 @@ class CameraApp(QWidget):
         n_dilate = self.control_panel.dilate_spin.value()
         min_samples = self.control_panel.min_samples_spin.value()
         self.AOI_worker.set_params(threshold, n_erode, n_dilate, min_samples)
+        self.image_label.set_overlay_text("辨識中")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -693,7 +709,7 @@ class CameraApp(QWidget):
             self.control_panel.raise_()
             self.control_panel.activateWindow()
 
-        elif event.key() == Qt.Key_Enter: #Qt.Key_Space:  # 新增：空白鍵 -> 移動並觸發手動圈數計算
+        elif event.key() == Qt.Key_Enter:
             self.fount_back = self.check_test_fount_back(self.current_folder)
 
             if self.fount_back < 0 :
@@ -701,7 +717,7 @@ class CameraApp(QWidget):
                 return
             
             self.display_video = True
-            self.camera_move_worker.move_to_next_position(0)
+            self.camera_move_worker.multi_position_flag = True
 
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
@@ -710,12 +726,10 @@ class CameraApp(QWidget):
             self.AOI_worker.fount_back = self.fount_back 
 
             self.reset_aoi_value()
-            self.image_label.set_overlay_text("辨識中")
-
             self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
             self.camera_move_worker.wake()
 
-        elif event.key() == Qt.Key_D:  # 移動並觸發手動圈數計算
+        elif event.key() == Qt.Key_D: 
             if len(self.AOI_worker.detect_result) != self.AOI_worker.detect_max_index:
                 return
             self.fount_back = self.check_test_fount_back(self.current_folder)
@@ -729,23 +743,16 @@ class CameraApp(QWidget):
                 return
 
             self.display_video = True
-            self.camera_move_worker.move_to_next_position(self.show_detect_result_index)
-            
-            self.AOI_worker.detect_frame[self.show_detect_result_index] = self.current_frame.copy()
+            self.camera_move_worker.multi_position_flag = False
+            self.camera_move_worker.current_position_index = self.show_detect_result_index
+
             self.AOI_worker.detect_index = self.show_detect_result_index
             self.AOI_worker.fount_back = self.fount_back 
 
             self.reset_aoi_value()
-            
-            self.image_label.set_overlay_text("辨識中")
 
-            self.AOI_worker.wake()
-
-            # self.AOI_worker.match(self.camera_move_worker.current_position_index)
-            # self.show_detect_result_index = self.camera_move_worker.current_position_index
-            # self.match_done_to_show_image(self.show_detect_result_index)
-
-            # self.image_label.set_overlay_text("")
+            self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
+            self.camera_move_worker.wake()
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
@@ -814,7 +821,7 @@ class CameraApp(QWidget):
         self.reset_display_frame_for_result()
         self.show_detect_result_index = self.camera_move_worker.current_position_index
         self.match_done_to_show_image(self.show_detect_result_index)
-        self.image_label.set_overlay_text("")
+        #self.image_label.set_overlay_text("")
         
     def reset_display_frame_for_result(self):
         self.image_label.zoom_scale = 1.0
@@ -837,7 +844,7 @@ class CameraApp(QWidget):
         else:
             t, b, l, r = self.AOI_worker.aoi_rect[index]
             self.show_image(self.AOI_worker.detect_frame[index][t:b,l:r])
-        self.match_done_to_show_image(f"角度 {index+1}")
+        self.image_label.set_overlay_text(f"角度 {index+1}")
 
     @pyqtSlot(str, str, int)
     def show_message_box(self, title, text, close_time=5000, font_size=16, box_width=1000, box_height=400):
