@@ -796,6 +796,11 @@ class CameraApp(QWidget):
                 self.display_video = False
                 time.sleep(0.1)
                 self.match_done_to_show_image(self.show_detect_result_index)
+        elif event.key() == Qt.Key_F:
+            if self.image_label.overlay_text == "":
+                self.image_label.set_overlay_text(f"角度 {self.show_detect_result_index+1}")
+            else:
+                self.image_label.set_overlay_text("")
         
         elif event.key() == Qt.Key_Left:
             self.reset_display_frame_for_result()

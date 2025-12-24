@@ -28,7 +28,6 @@ class AOILabel(QLabel):
         # 新增：覆蓋層文字
         self.overlay_text = ""
 
-
     def resizeEvent(self, event):
         self.label_width = self.width()   # 更新 label 寬度
         self.label_height = self.height() # 更新 label 高度
@@ -114,7 +113,6 @@ class AOILabel(QLabel):
         img_y = self.top + (scaled_y / scaled_h) * current_pixmap_h
         return img_x, img_y
 
-
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
@@ -134,6 +132,10 @@ class AOILabel(QLabel):
                 # 再次確保 left/top 不為負
                 self.left = max(0, self.left)
                 self.top = max(0, self.top)
+                
+                # 確保為整數，避免 copy 報錯
+                self.left = int(self.left)
+                self.top = int(self.top)
 
                 cropped = self._pixmap.copy(self.left, self.top, crop_w, crop_h)
                 scaled_pixmap = cropped.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -187,14 +189,19 @@ class AOILabel(QLabel):
                 pixmap_w = self._pixmap.width()
                 pixmap_h = self._pixmap.height()
                 
-                scale_x = (pixmap_w / self.zoom_scale) / self.width()
-                scale_y = (pixmap_h / self.zoom_scale) / self.height()
+                # 計算裁切區域大小
+                crop_w = pixmap_w / self.zoom_scale
+                crop_h = pixmap_h / self.zoom_scale
                 
-                self.left -= delta.x() * scale_x
-                self.top -= delta.y() * scale_y
+                # 計算實際顯示的縮放比例 (考慮 KeepAspectRatio)
+                scale = min(self.width() / crop_w, self.height() / crop_h)
                 
-                self.pan_start_pos = event.pos()
-                self.update()
+                if scale > 0:
+                    self.left -= delta.x() / scale
+                    self.top -= delta.y() / scale
+                    
+                    self.pan_start_pos = event.pos()
+                    self.update()
         else:
             super().mouseMoveEvent(event)
 
