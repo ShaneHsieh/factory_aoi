@@ -56,6 +56,7 @@ class AOIMatchWorker(QObject):
         #self.frame = None
         self.detect_frame = []
         self.goldens = []
+        self.masks = []
         self.detect_result = []
         self.detect_index = -1
         self.detect_max_index = 4
@@ -115,6 +116,7 @@ class AOIMatchWorker(QObject):
         """根據 camera_move_worker 的路徑順序，載入所有樣本和 aoi_rect。"""
         all_goldens = []
         all_aoi_rects = []
+        self.masks = []
 
         if not os.path.isdir(folder_path):
             self.message_box.emit("設定檢測樣本", f"資料夾不存在！\n{folder_path}", 3000)
@@ -126,11 +128,12 @@ class AOIMatchWorker(QObject):
         # 依序讀取正面(0)和反面(1)
         for fount in range(2):
             for i in range(len(camera_move_worker.position)):
-                goldens_in_subdir, aoi_rect = self.load_sample_for_index(folder_path, camera_move_worker, fount, i)
+                goldens_in_subdir, aoi_rect , mask = self.load_sample_for_index(folder_path, camera_move_worker, fount, i)
                 all_goldens.append(goldens_in_subdir)
                 all_aoi_rects.append(aoi_rect)
+                self.masks.append(mask)
 
-        self.detect_max_index = camera_move_worker.position
+        self.detect_max_index = len(camera_move_worker.position)
         self.goldens = all_goldens
         self.aoi_rect = all_aoi_rects
 
@@ -143,12 +146,18 @@ class AOIMatchWorker(QObject):
     
     def sample_load(self,sub_dir):
         goldens_in_subdir = []
+        mask = None
         bmp_files = get_file(sub_dir, extension='.bmp')
         if not bmp_files:
             print(f"{sub_dir} no bmp file, returning empty sample.")
             return goldens_in_subdir, None
 
         for img_path in bmp_files:
+            filename = os.path.basename(img_path)
+            if filename == "mask.bmp":
+                mask = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE) / 255 
+                mask = mask.astype(np.uint8)
+                continue
             golden_img = cv2.imread(img_path)
             kp, des = self.aoi_model.get_keypoint_grid(golden_img)
             goldens_in_subdir.append([golden_img, kp, des])
@@ -168,7 +177,7 @@ class AOIMatchWorker(QObject):
             except Exception as e:
                 self.message_box.emit("讀取 .ini 失敗", f"讀取 {inifiles[0]} 時發生錯誤: {e}", 3000)
         
-        return goldens_in_subdir, aoi_rect
+        return goldens_in_subdir, aoi_rect, mask
 
     def match(self , index = -1):
         #print(f"self.detect_index = {self.detect_index} self.goldens = {len(self.goldens)} len(self.detect_frame) {len(self.detect_frame)}")
@@ -183,7 +192,7 @@ class AOIMatchWorker(QObject):
 
         start_time = time.time()
         mask, mask_mean, mask_min, a , maskindex = self.aoi_model.match_template(frame, self.goldens[goldens_index], aoi=self.aoi_rect[goldens_index])
-        circle_image , n  = self.match_result(mask_min, a)
+        circle_image , n  = self.match_result(mask_min, a , aoi=self.aoi_rect[goldens_index])
         end_time = time.time()
         print(f"frame = {frame.shape} time = {end_time - start_time}  , index = {maskindex} , n = {n}")
 
@@ -193,9 +202,19 @@ class AOIMatchWorker(QObject):
         else:
             self.detect_result[index] = (circle_image , n)
 
-    def match_result(self, mask_min, a):
+    def match_result(self, mask_min, a , aoi=None):
         m = self.aoi_model.post_proc(mask_min, self.threshold, self.n_erode, self.n_dilate)
-        #res = (np.stack([np.maximum(m,a[:,:,0]) , a[:,:,1]*(m==0), a[:,:,2]*(m==0)], axis=-1))
+
+        goldens_index = self.detect_index if self.fount_back == 0 else self.detect_index + self.detect_max_index
+
+        if self.masks and len(self.masks) > goldens_index:
+            if self.masks[goldens_index] is not None:
+                if self.masks[goldens_index].shape == m.shape:
+                    m = self.masks[goldens_index] * m
+                else:
+                    print(f"mask shape mismatch: mask {self.masks[goldens_index].shape} vs m {m.shape}")
+                    m = self.masks[goldens_index][aoi[0]:aoi[1], aoi[2]:aoi[3]] * m
+                    
         res = (np.stack([a[:,:,0]*(m==0), a[:,:,1]*(m==0)  ,np.maximum(m,a[:,:,2]) ], axis=-1))
         return self.aoi_model.draw_circle(m, res, min_samples=self.min_samples)
 
@@ -511,13 +530,13 @@ class CameraApp(QWidget):
     def on_move_done(self):
         #if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
         #    return  # 只在回到起點時顯示訊息
-        if self.camera_move_worker.move_camera_get_frame_done_callback == None:
+        if self.camera_move_worker.move_camera_get_frame_done_callback != self.camera_move_done_callback:
             self.message_box.emit("拍照完成", "正樣本拍照完成" , -1 )
         self.display_video = False
         #elif self.camera_move_worker.move_camera_get_frame_done_callback == self.camera_move_done_callback:
         #    self.message_box.emit("檢測完成", "PASS" , -1)
 
-    def snapshot_positive_image(self):
+    def snapshot_positive_image(self , index = -1):
         """啟動正樣本拍照 (在背景 thread 中執行)
         """
         start_time = time.time()
@@ -553,8 +572,8 @@ class CameraApp(QWidget):
         
         print(f"len(front_samples) = {len(front_samples)} len(back_samples) = {len(back_samples)} time = {end_time - start_time} ")
 
-        def worker_callback(frame_copy):
-            folder = self.get_move_folder(positive_folder , fount_back , self.camera_move_worker.current_position_index)
+        def worker_callback(frame_copy , index = -1):
+            folder = self.get_move_folder(positive_folder , self.fount_back , self.camera_move_worker.current_position_index)
             os.makedirs(folder, exist_ok=True)
             try:
                 self.snapshot_path(frame_copy, folder, message=False)
@@ -708,6 +727,15 @@ class CameraApp(QWidget):
             self.control_panel.show()
             self.control_panel.raise_()
             self.control_panel.activateWindow()
+            
+        elif event.key() == Qt.Key_A:
+            for i, mask in enumerate(self.AOI_worker.masks):
+                if mask is None:
+                    print("No mask found " , i)
+                else:
+                    print("Mask shape " , i , mask.shape , " max = " , mask.max() , " min = " , mask.min())
+
+            self.mask_display_mode()
 
         elif event.key() == Qt.Key_Enter:
             self.fount_back = self.check_test_fount_back(self.current_folder)
@@ -768,7 +796,7 @@ class CameraApp(QWidget):
             self.message_box.emit("新增正樣本", message_text, 3000)
 
             goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.AOI_worker.detect_max_index + self.show_detect_result_index
-            self.AOI_worker.goldens[goldens_index], _ = self.AOI_worker.sample_load(folder)
+            self.AOI_worker.goldens[goldens_index], _ , _ = self.AOI_worker.sample_load(folder)
         elif event.key() == Qt.Key_F2: # F2 負樣本
             folder_path = "nagetive_samples"
             folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
@@ -828,10 +856,37 @@ class CameraApp(QWidget):
         self.match_done_to_show_image(self.show_detect_result_index)
         #self.image_label.set_overlay_text("")
         
+    def mask_display_mode(self):
+        if self.image_label.draw_mode:
+            folder_path = self.control_panel.folder_combo.currentText()
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
+            if not os.path.isdir(folder):
+                self.message_box.emit("沒有資料夾", f"{folder} 沒有mask 資料夾", 3000)
+            #os.makedirs(folder, exist_ok=True)
+            filename = os.path.join(folder, "mask.bmp")
+            print("Saving mask to " , filename)
+            self.image_label.save_mask(filename)
+            self.image_label.set_draw_mode(False)
+            self.image_label.set_mask(None)
+            
+            self.show_detect_result_frame_flag = True
+            self.match_done_to_show_image(self.show_detect_result_index)
+        else:
+            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
+            self.image_label.set_mask(self.AOI_worker.masks[goldens_index])
+            self.image_label.set_draw_mode(True) 
+            #time.sleep(0.1)
+            self.show_image(self.AOI_worker.detect_frame[self.show_detect_result_index])
+
+        
+
     def reset_display_frame_for_result(self):
         self.image_label.zoom_scale = 1.0
         self.image_label.zoom_center = None
         self.show_detect_result_frame_flag = True
+        if self.image_label.draw_mode:
+            self.mask_display_mode()
+            
 
     def match_done_to_show_image(self,index):
         if index > len(self.AOI_worker.detect_result) - 1:

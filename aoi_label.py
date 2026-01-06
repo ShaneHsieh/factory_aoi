@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import QLabel, QSizePolicy
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor, QPen
+from PyQt5.QtCore import pyqtSignal, Qt, QRect
 
 
 class AOILabel(QLabel):
@@ -27,6 +27,18 @@ class AOILabel(QLabel):
         self.pan_start_pos = None
         # 新增：覆蓋層文字
         self.overlay_text = ""
+        
+        # Mask and Drawing
+        self.mask = None
+        self._mask_pixmap = None
+        self.draw_mode = False
+        self.drawing_rect = False
+        self.rect_start = None
+        self.rect_end = None
+        
+        # 座標轉換用的快取
+        self.displayed_rect = None
+        self.source_rect = None
 
     def resizeEvent(self, event):
         self.label_width = self.width()   # 更新 label 寬度
@@ -36,6 +48,34 @@ class AOILabel(QLabel):
     def setPixmap(self, pixmap):
         self._pixmap = pixmap
         self.update()
+
+    def set_mask(self, mask):
+        self.mask = mask
+        self.update_mask_pixmap()
+        self.update()
+
+    def update_mask_pixmap(self):
+        if self.mask is None:
+            self._mask_pixmap = None
+            return
+        
+        h, w = self.mask.shape
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        # Mask == 0 的區域顯示為半透明灰色 (R=128, G=128, B=128, A=100)
+        overlay[self.mask == 0] = [64, 64, 64, 100]
+        
+        qimg = QImage(overlay.data, w, h, w * 4, QImage.Format_RGBA8888)
+        self._mask_pixmap = QPixmap.fromImage(qimg.copy())
+
+    def set_draw_mode(self, enabled):
+        self.draw_mode = enabled
+        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+
+    def save_mask(self, file_path):
+        if self.mask is not None:
+            # 將 mask 轉換為 0 和 255 (二值化)，以便下次讀取
+            binary_mask = (self.mask > 0).astype(np.uint8) * 255
+            cv2.imwrite(file_path, binary_mask)
 
     def set_overlay_text(self, text):
         """設定覆蓋層文字"""
@@ -113,6 +153,28 @@ class AOILabel(QLabel):
         img_y = self.top + (scaled_y / scaled_h) * current_pixmap_h
         return img_x, img_y
 
+    def widget_to_image_coords_clamped(self, x, y):
+        """將 widget 座標轉換為影像座標，並限制在影像範圍內"""
+        if self._pixmap is None or not hasattr(self, 'displayed_rect') or self.displayed_rect is None:
+            return 0, 0
+        
+        # 限制 x, y 在顯示區域內
+        # displayed_rect.right() 是 left + width - 1，所以要加 1 才能包含邊界
+        dx = max(self.displayed_rect.left(), min(x, self.displayed_rect.left() + self.displayed_rect.width()))
+        dy = max(self.displayed_rect.top(), min(y, self.displayed_rect.top() + self.displayed_rect.height()))
+        
+        if self.displayed_rect.width() == 0 or self.displayed_rect.height() == 0:
+            return 0, 0
+
+        # 計算相對位置 (0.0 ~ 1.0)
+        rel_x = (dx - self.displayed_rect.left()) / self.displayed_rect.width()
+        rel_y = (dy - self.displayed_rect.top()) / self.displayed_rect.height()
+
+        # 映射回來源影像座標
+        img_x = self.source_rect.left() + rel_x * self.source_rect.width()
+        img_y = self.source_rect.top() + rel_y * self.source_rect.height()
+        return img_x, img_y
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
@@ -143,7 +205,19 @@ class AOILabel(QLabel):
                 # 繪製時置中 (如果 scaled_pixmap 沒有填滿 widget)
                 x = (widget_w - scaled_pixmap.width()) // 2
                 y = (widget_h - scaled_pixmap.height()) // 2
+                
+                # 儲存顯示區域與來源區域，供座標轉換使用
+                self.displayed_rect = QRect(x, y, scaled_pixmap.width(), scaled_pixmap.height())
+                self.source_rect = QRect(self.left, self.top, crop_w, crop_h)
+                
                 painter.drawPixmap(x, y, scaled_pixmap)
+                
+                if self._mask_pixmap:
+                    cropped_mask = self._mask_pixmap.copy(self.left, self.top, crop_w, crop_h)
+                    scaled_mask = cropped_mask.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    mx = (widget_w - scaled_mask.width()) // 2
+                    my = (widget_h - scaled_mask.height()) // 2
+                    painter.drawPixmap(mx, my, scaled_mask)
             else:
                 # --- 正常顯示模式 ---
                 self.zoom_scale = 1.0
@@ -155,7 +229,18 @@ class AOILabel(QLabel):
                 scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 x = (widget_w - scaled_pixmap.width()) // 2
                 y = (widget_h - scaled_pixmap.height()) // 2
+                
+                # 儲存顯示區域與來源區域，供座標轉換使用
+                self.displayed_rect = QRect(x, y, scaled_pixmap.width(), scaled_pixmap.height())
+                self.source_rect = QRect(0, 0, pixmap_w, pixmap_h)
+                
                 painter.drawPixmap(x, y, scaled_pixmap)
+                
+                if self._mask_pixmap:
+                    scaled_mask = self._mask_pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    mx = (widget_w - scaled_mask.width()) // 2
+                    my = (widget_h - scaled_mask.height()) // 2
+                    painter.drawPixmap(mx, my, scaled_mask)
         
         # 繪製覆蓋層文字（在圖像之上）
         if self.overlay_text:
@@ -172,8 +257,19 @@ class AOILabel(QLabel):
             # 繪製文字
             painter.drawText(text_rect, Qt.AlignCenter | Qt.AlignVCenter, self.overlay_text)
 
+        if self.drawing_rect and self.rect_start and self.rect_end:
+            painter.setPen(QPen(Qt.yellow, 2, Qt.SolidLine))
+            painter.setBrush(Qt.NoBrush)
+            rect = QRect(self.rect_start, self.rect_end)
+            painter.drawRect(rect)
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.RightButton and self.zoom_scale > 1.0:
+        if self.draw_mode and (event.button() == Qt.LeftButton or event.button() == Qt.RightButton):
+            self.drawing_rect = True
+            self.rect_start = event.pos()
+            self.rect_end = event.pos()
+            self.update()
+        elif event.button() == Qt.RightButton and self.zoom_scale > 1.0:
             self.panning = True
             self.pan_start_pos = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -181,7 +277,10 @@ class AOILabel(QLabel):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.panning and self.pan_start_pos is not None:
+        if self.drawing_rect:
+            self.rect_end = event.pos()
+            self.update()
+        elif self.panning and self.pan_start_pos is not None:
             delta = event.pos() - self.pan_start_pos
             
             # 將 widget 上的移動量轉換為原始圖片上的移動量
@@ -206,9 +305,45 @@ class AOILabel(QLabel):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
+        if self.drawing_rect :
+            self.drawing_rect = False
+            self.rect_end = event.pos()
+            if event.button() == Qt.LeftButton:
+                self.apply_mask_rect(0)
+            elif event.button() == Qt.RightButton:
+                self.apply_mask_rect(1)
+            self.update()
+        elif event.button() == Qt.RightButton:
             self.panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
         else:
             super().mouseReleaseEvent(event)
+
+    def apply_mask_rect(self, value=0):
+        print("apply_mask_rect called")
+        if self.rect_start is None or self.rect_end is None or self._pixmap is None:
+            return
+
+        if self.mask is None:
+            print("No existing mask, creating new one")
+            self.mask = np.ones((self.video_height, self.video_width), dtype=np.uint8)
+            #self.update_mask_pixmap()
+        print("Current mask shape: ", self.mask.shape)
+        #x1, y1 = self.widget_to_image_coords_clamped(self.rect_start.x(), self.rect_start.y())
+        #x2, y2 = self.widget_to_image_coords_clamped(self.rect_end.x(), self.rect_end.y())
+
+        x1, y1 = self.widget_to_image_coords(self.rect_start.x(), self.rect_start.y())
+        x2, y2 = self.widget_to_image_coords(self.rect_end.x(), self.rect_end.y())
+
+        ix1, ix2 = sorted([int(x1), int(x2)])
+        iy1, iy2 = sorted([int(y1), int(y2)])
+
+        h, w = self.mask.shape
+        ix1 = max(0, min(ix1, w))
+        ix2 = max(0, min(ix2, w))
+        iy1 = max(0, min(iy1, h))
+        iy2 = max(0, min(iy2, h))
+
+        self.mask[iy1:iy2, ix1:ix2] = value
+        self.update_mask_pixmap()
