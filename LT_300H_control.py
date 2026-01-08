@@ -3,7 +3,7 @@ import time
 import numpy as np
 import threading
 
-import random 
+from PyQt5.QtWidgets import QMessageBox
 
 class LT300HControl(SerialDevice):
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
@@ -11,8 +11,8 @@ class LT300HControl(SerialDevice):
         self.open()
         if self.ser is None:
             print("RS232 連接有誤")
-            QMessageBox.warning(self, "RS232 沒有接上", "無法控制攝影機")
-            sys.exit(1)
+            QMessageBox.warning(None,"RS232 沒有接上","無法控制 LT-300H 請確認 RS232 連接是否正確")
+            return
         self.start_reading()
         self.set_move_speed(100)
         #self.get_current_position()#100.001,100.002,0.000
@@ -181,7 +181,8 @@ if __name__ == "__main__":
         pass
     finally:
         dev.close()
-
+        
+    #improt random
     # try:
     #     while True:
     #         x = round(random.uniform(0,200),3)

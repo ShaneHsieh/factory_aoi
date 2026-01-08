@@ -199,25 +199,25 @@ class AOILabel(QLabel):
                 self.left = int(self.left)
                 self.top = int(self.top)
 
-                cropped = self._pixmap.copy(self.left, self.top, crop_w, crop_h)
-                scaled_pixmap = cropped.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # 計算目標繪製區域 (維持長寬比)
+                scale = min(widget_w / crop_w, widget_h / crop_h)
+                dest_w = int(crop_w * scale)
+                dest_h = int(crop_h * scale)
+                dest_x = (widget_w - dest_w) // 2
+                dest_y = (widget_h - dest_h) // 2
                 
-                # 繪製時置中 (如果 scaled_pixmap 沒有填滿 widget)
-                x = (widget_w - scaled_pixmap.width()) // 2
-                y = (widget_h - scaled_pixmap.height()) // 2
+                target_rect = QRect(dest_x, dest_y, dest_w, dest_h)
+                source_rect = QRect(self.left, self.top, crop_w, crop_h)
                 
                 # 儲存顯示區域與來源區域，供座標轉換使用
-                self.displayed_rect = QRect(x, y, scaled_pixmap.width(), scaled_pixmap.height())
+                self.displayed_rect = target_rect
                 self.source_rect = QRect(self.left, self.top, crop_w, crop_h)
                 
-                painter.drawPixmap(x, y, scaled_pixmap)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                painter.drawPixmap(target_rect, self._pixmap, source_rect)
                 
                 if self._mask_pixmap:
-                    cropped_mask = self._mask_pixmap.copy(self.left, self.top, crop_w, crop_h)
-                    scaled_mask = cropped_mask.scaled(widget_w, widget_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    mx = (widget_w - scaled_mask.width()) // 2
-                    my = (widget_h - scaled_mask.height()) // 2
-                    painter.drawPixmap(mx, my, scaled_mask)
+                    painter.drawPixmap(target_rect, self._mask_pixmap, source_rect)
             else:
                 # --- 正常顯示模式 ---
                 self.zoom_scale = 1.0
@@ -226,21 +226,22 @@ class AOILabel(QLabel):
                 self.top = 0
                 scale = min(widget_w / pixmap_w, widget_h / pixmap_h)
                 new_w, new_h = int(pixmap_w * scale), int(pixmap_h * scale)
-                scaled_pixmap = self._pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                x = (widget_w - scaled_pixmap.width()) // 2
-                y = (widget_h - scaled_pixmap.height()) // 2
+
+                x = (widget_w - new_w) // 2
+                y = (widget_h - new_h) // 2
+                
+                target_rect = QRect(x, y, new_w, new_h)
+                source_rect = QRect(0, 0, pixmap_w, pixmap_h)
                 
                 # 儲存顯示區域與來源區域，供座標轉換使用
-                self.displayed_rect = QRect(x, y, scaled_pixmap.width(), scaled_pixmap.height())
-                self.source_rect = QRect(0, 0, pixmap_w, pixmap_h)
+                self.displayed_rect = target_rect
+                self.source_rect = source_rect
                 
-                painter.drawPixmap(x, y, scaled_pixmap)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                painter.drawPixmap(target_rect, self._pixmap, source_rect)
                 
                 if self._mask_pixmap:
-                    scaled_mask = self._mask_pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    mx = (widget_w - scaled_mask.width()) // 2
-                    my = (widget_h - scaled_mask.height()) // 2
-                    painter.drawPixmap(mx, my, scaled_mask)
+                    painter.drawPixmap(target_rect, self._mask_pixmap, source_rect)
         
         # 繪製覆蓋層文字（在圖像之上）
         if self.overlay_text:

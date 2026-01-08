@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class cv_aoi:
     def __init__(self):
-        pass
+        # 強制啟用 OpenCL 以支援 Intel GPU 加速
+        cv2.ocl.setUseOpenCL(True)
         
     def __call__(self, img1, goldens, aoi = None):
         mask, mask_mean, mask_min, a = self.match_template(img1, goldens, aoi = aoi)
@@ -126,6 +127,8 @@ class cv_aoi:
         # 去找 golden 在 test 的位置
         # 最後去看 diff 差異
     
+
+        start_time = time.time()
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         matches = bf.knnMatch(des2, des1, k=2)
         
@@ -148,6 +151,9 @@ class cv_aoi:
         else:
             c = cv2.warpPerspective(c, np.eye(3), img1.shape[:2][::-1])
 
+        
+        start_time2 = time.time()
+
         if len(good)>MIN_MATCH_COUNT:
             try:
                 src_pts = np.float32([ kp2[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
@@ -160,21 +166,91 @@ class cv_aoi:
                 a = c
         else:
             a = c
+        
+        start_time3 = time.time()
 
         b = img1.copy()[ aoi[0]:aoi[1], aoi[2]:aoi[3] ]
         a = a[ aoi[0]:aoi[1], aoi[2]:aoi[3] ]
         c = c[ aoi[0] - golden_crop[0] : aoi[1] - golden_crop[1] , aoi[2] - golden_crop[2] : aoi[3] - golden_crop[3] ]
 
-        a = (a-a.mean())*b.std()/a.std()+b.mean()
-        c = (c-c.mean())*b.std()/c.std()+b.mean()
+        # --- Intel GPU (OpenCL) 加速區段 ---
+        if cv2.ocl.haveOpenCL():
+            try:
+                # 定義計算全域 mean/std 的輔助函式 (符合 numpy 行為)
+                def get_stats_umat(u):
+                    m, s = cv2.meanStdDev(u)
+                    if hasattr(m, 'get'):
+                        m = m.get()
+                    if hasattr(s, 'get'):
+                        s = s.get()
+                    m = m.flatten()
+                    s = s.flatten()
+                    g_m = np.mean(m)
+                    # Global variance = mean(sigma^2 + mu^2) - global_mu^2
+                    g_v = np.mean(s**2 + m**2) - g_m**2
+                    g_s = np.sqrt(max(0, g_v))
+                    return g_m, g_s
+
+                # 將 numpy array 轉為 UMat (自動使用 GPU 記憶體)
+                # 使用 float32 進行運算以保持精度
+                b_u = cv2.UMat(b)
+                # 使用 addWeighted 替代 convertTo 進行型別轉換 (uint8 -> float32)
+                b_f = cv2.addWeighted(b_u, 1.0, b_u, 0, 0.0, dtype=cv2.CV_32F)
+                mean_b, std_b = get_stats_umat(b_u)
+
+                def normalize_and_diff(img_np, mean_target, std_target, img_target_f):
+                    img_u = cv2.UMat(img_np)
+                    mean_src, std_src = get_stats_umat(img_u)
+                    
+                    scale = 1.0
+                    offset = 0.0
+                    if std_src > 1e-6:
+                        scale = std_target / std_src
+                        offset = mean_target - mean_src * scale
+                    
+                    # 轉換為 float32 並同時應用線性變換 (alpha=scale, beta=offset)
+                    # 使用 addWeighted 替代 convertTo，同時完成線性變換與型別轉換
+                    img_f = cv2.addWeighted(img_u, scale, img_u, 0, offset, dtype=cv2.CV_32F)
+                    
+                    # 計算差異: abs(img - target)
+                    diff_f = cv2.absdiff(img_f, img_target_f)
+                    # 加總 Channel: (H,W,3) -> (H,W,1)
+                    kernel = np.ones((1, 3), dtype=np.float32)
+                    diff_sum = cv2.transform(diff_f, kernel)
+                    return diff_sum
+
+                diff_a_u = normalize_and_diff(a, mean_b, std_b, b_f)
+                diff_c_u = normalize_and_diff(c, mean_b, std_b, b_f)
+
+                # 比較總差異
+                sum_a = cv2.sumElems(diff_a_u)[0]
+                sum_c = cv2.sumElems(diff_c_u)[0]
+
+                best_diff_u = diff_a_u if sum_a < sum_c else diff_c_u
+                # 轉回 CPU numpy array 並移除最後一個維度 (H,W,1) -> (H,W)
+                best_diff_np = best_diff_u.get()
+                return best_diff_np.reshape(best_diff_np.shape[:2]), b
+            except cv2.error as e:
+                print(f"OpenCL error: {e}, falling back to CPU")
+        
+        # --- 原始 CPU 邏輯 (Fallback) ---
+        else:
+            a = (a-a.mean())*b.std()/a.std()+b.mean()
+            c = (c-c.mean())*b.std()/c.std()+b.mean()
 
         diff_a = np.abs(a-b).sum(-1)
         diff_c = np.abs(c-b).sum(-1)
 
+        
+        end_time = time.time()
+
+        print(f"get diff match time2 = {start_time2 - start_time} time3 = {start_time3 - start_time2} end = {end_time - start_time3} ")
+        
+        print(f"get diff pre time = {end_time - start_time} ")
+
         if diff_a.sum()<diff_c.sum():
             return diff_a , b
         else:
-            #print('no transform')
             return diff_c , b
 
     def match_template(self,img1, goldens, aoi = None ):

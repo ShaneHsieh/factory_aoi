@@ -477,14 +477,18 @@ class CameraApp(QWidget):
         if display_image is None:
             print("display_image is None")
             return
-        try: 
-            rgb_image = display_image.copy() if display_image is not None else np.zeros((100,100,3), dtype=np.uint8)
-            h, w, ch = rgb_image.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
+        try:
+            # 確保資料連續 (如果是切片或翻轉後的 view，這步會轉為連續記憶體)
+            if not display_image.flags['C_CONTIGUOUS']:
+                display_image = np.ascontiguousarray(display_image)
+
+            h, w, ch = display_image.shape
+            bytes_per_line = display_image.strides[0]
+            # 直接使用 display_image.data 建立 QImage (Zero-copy)
+            qt_image = QImage(display_image.data, w, h, bytes_per_line, QImage.Format_BGR888)
             self.image_label.setPixmap(QPixmap.fromImage(qt_image))
-        except:
-            print("show_image crash")
+        except Exception as e:
+            print(f"show_image crash: {e}")
 
     def update_frame(self):
         ret, frame = self.cap.read()
@@ -492,15 +496,15 @@ class CameraApp(QWidget):
             if frame.max() == 0:
                 self.current_frame = None
                 return
-            frame = cv2.flip(frame, -1)
-            self.current_frame = frame.copy()
+            #frame = cv2.flip(frame, -1)
+            #self.current_frame = frame.copy()
+            
+            # 使用 numpy slicing 進行翻轉 (View) 並直接轉為連續記憶體，合併了 flip 與 copy 的操作
+            self.current_frame = np.ascontiguousarray(frame[::-1, ::-1])
             if self.display_video == True:
-                display_frame = frame.copy()
-                #need to fix Shane
-                #if self.aoi_rect:
-                #    t, b, l, r = self.aoi_rect
-                #    cv2.rectangle(display_frame, (l, t), (r, b), (0, 0, 255), 4)
-                self.show_image(display_frame) 
+            #     #display_frame = frame.copy()
+            #     #self.show_image(display_frame)
+                self.show_image(self.current_frame)
 
     def snapshot_path(self, frame, path , message=False):
         if not os.path.isdir(path):
@@ -528,13 +532,22 @@ class CameraApp(QWidget):
         self.AOI_worker.wake()
 
     def on_move_done(self):
-        #if self.LT_300H_dev.check_current_position(self.LT_300H_dev.start_x , self.LT_300H_dev.start_y ,self.LT_300H_dev.start_z) != True:
-        #    return  # 只在回到起點時顯示訊息
-        if self.camera_move_worker.move_camera_get_frame_done_callback != self.camera_move_done_callback:
+        if self.camera_move_worker.move_camera_get_frame_done_callback == self.snapshot_worker_callback:
             self.message_box.emit("拍照完成", "正樣本拍照完成" , -1 )
         self.display_video = False
-        #elif self.camera_move_worker.move_camera_get_frame_done_callback == self.camera_move_done_callback:
-        #    self.message_box.emit("檢測完成", "PASS" , -1)
+
+    def snapshot_worker_callback(self, frame_copy, index=-1):
+        positive_folder = (self.control_panel.folder_save_path 
+                          if hasattr(self.control_panel, 'folder_save_path') 
+                          else os.path.dirname(os.path.abspath(__file__)))
+        
+        folder = self.get_move_folder(positive_folder , self.fount_back , self.camera_move_worker.current_position_index)
+        os.makedirs(folder, exist_ok=True)
+        try:
+            self.snapshot_path(frame_copy, folder, message=False)
+            self.detect_and_save_aoi_rect(frame_copy, folder)
+        except Exception as e:
+            print(f"snapshot save error: {e}")
 
     def snapshot_positive_image(self , index = -1):
         """啟動正樣本拍照 (在背景 thread 中執行)
@@ -572,16 +585,7 @@ class CameraApp(QWidget):
         
         print(f"len(front_samples) = {len(front_samples)} len(back_samples) = {len(back_samples)} time = {end_time - start_time} ")
 
-        def worker_callback(frame_copy , index = -1):
-            folder = self.get_move_folder(positive_folder , self.fount_back , self.camera_move_worker.current_position_index)
-            os.makedirs(folder, exist_ok=True)
-            try:
-                self.snapshot_path(frame_copy, folder, message=False)
-                self.detect_and_save_aoi_rect(frame_copy, folder)
-            except Exception as e:
-                print(f"snapshot save error: {e}")
-
-        self.camera_move_worker.move_camera_get_frame_done_callback = worker_callback
+        self.camera_move_worker.move_camera_get_frame_done_callback = self.snapshot_worker_callback
         self.camera_move_worker.wake()
 
     def detect_and_save_aoi_rect(self, frame, folder_path):
@@ -744,7 +748,7 @@ class CameraApp(QWidget):
                 self.message_box.emit("沒有樣本", f"{self.current_folder} 沒有樣本", 3000)
                 return
             
-            self.display_video = True
+            self.display_video = False
             self.camera_move_worker.multi_position_flag = True
 
             self.AOI_worker.detect_frame = []
@@ -878,15 +882,12 @@ class CameraApp(QWidget):
             #time.sleep(0.1)
             self.show_image(self.AOI_worker.detect_frame[self.show_detect_result_index])
 
-        
-
     def reset_display_frame_for_result(self):
         self.image_label.zoom_scale = 1.0
         self.image_label.zoom_center = None
         self.show_detect_result_frame_flag = True
         if self.image_label.draw_mode:
             self.mask_display_mode()
-            
 
     def match_done_to_show_image(self,index):
         if index > len(self.AOI_worker.detect_result) - 1:
