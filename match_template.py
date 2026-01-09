@@ -238,20 +238,20 @@ class cv_aoi:
             a = (a-a.mean())*b.std()/a.std()+b.mean()
             c = (c-c.mean())*b.std()/c.std()+b.mean()
 
-        diff_a = np.abs(a-b).sum(-1)
-        diff_c = np.abs(c-b).sum(-1)
+            diff_a = np.abs(a-b).sum(-1)
+            diff_c = np.abs(c-b).sum(-1)
 
-        
-        end_time = time.time()
+            
+            end_time = time.time()
 
-        print(f"get diff match time2 = {start_time2 - start_time} time3 = {start_time3 - start_time2} end = {end_time - start_time3} ")
-        
-        print(f"get diff pre time = {end_time - start_time} ")
+            print(f"get diff match time2 = {start_time2 - start_time} time3 = {start_time3 - start_time2} end = {end_time - start_time3} ")
+            
+            print(f"get diff pre time = {end_time - start_time} ")
 
-        if diff_a.sum()<diff_c.sum():
-            return diff_a , b
-        else:
-            return diff_c , b
+            if diff_a.sum()<diff_c.sum():
+                return diff_a , b
+            else:
+                return diff_c , b
 
     def match_template(self,img1, goldens, aoi = None ):
 

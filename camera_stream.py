@@ -212,7 +212,6 @@ class AOIMatchWorker(QObject):
                 if self.masks[goldens_index].shape == m.shape:
                     m = self.masks[goldens_index] * m
                 else:
-                    print(f"mask shape mismatch: mask {self.masks[goldens_index].shape} vs m {m.shape}")
                     m = self.masks[goldens_index][aoi[0]:aoi[1], aoi[2]:aoi[3]] * m
                     
         res = (np.stack([a[:,:,0]*(m==0), a[:,:,1]*(m==0)  ,np.maximum(m,a[:,:,2]) ], axis=-1))
@@ -223,7 +222,7 @@ class CameraMoveWorker(QObject):
     def __init__(self, camera_app):
         super().__init__()
 
-        self.LT_300H_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+        self.LT_300H_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
         self.LT_300H_dev.set_start_position(35, 48, 21)
         self.LT_300H_dev.set_max_limit_position(150, 110, 21)
 
