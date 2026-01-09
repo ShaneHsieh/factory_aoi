@@ -22,8 +22,8 @@ class DeviceControl(AOILabel):
         self.setWindowTitle("Device Control - Camera & Motion")
         
         # 初始化設備
-        self.lt_300h_dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
-        self.lt_300h_dev.set_start_position(35, 48, 21)
+        self.lt_300h_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
+        #self.lt_300h_dev.set_start_position(35, 48, 21)
         self.lt_300h_dev.set_move_speed(10)
         
         self.current_frame = None
@@ -170,6 +170,8 @@ class DeviceControl(AOILabel):
             self.lt_300h_dev.move_zoom_out()
         elif event.key() == Qt.Key_Enter:
             self.snapshot()
+        elif event.key() == Qt.Key_G:
+            self.lt_300h_dev.get_current_position()
         else:
             super().keyPressEvent(event)
     

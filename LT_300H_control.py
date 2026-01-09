@@ -14,7 +14,7 @@ class LT300HControl(SerialDevice):
             QMessageBox.warning(None,"RS232 沒有接上","無法控制 LT-300H 請確認 RS232 連接是否正確")
             return
         self.start_reading()
-        self.set_move_speed(100)
+        self.set_move_speed(300)
         #self.get_current_position()#100.001,100.002,0.000
         time.sleep(0.5)  # 等待回應
         self.limit_x = np.array([0, 300])
@@ -105,7 +105,7 @@ class LT300HControl(SerialDevice):
                     self._arrive_callback(self._callback_context)
                 break
             
-            time.sleep(0.1)
+            time.sleep(0.05)
 
         if self._checking:
             print("⚠️ 超時：未在指定時間內到達目標位置")
@@ -165,7 +165,7 @@ class LT300HControl(SerialDevice):
         self.write(command)
 
 if __name__ == "__main__":
-    dev = LT300HControl(port="COM9", baudrate=115200, timeout=1.0)
+    dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
     time.sleep(2)  # 等待連線穩定 
     try:
         while True:

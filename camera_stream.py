@@ -223,11 +223,17 @@ class CameraMoveWorker(QObject):
         super().__init__()
 
         self.LT_300H_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
+        # by different lens with camera will be different setting
+        #self.LT_300H_dev.set_start_position(3, 32, 11)
         self.LT_300H_dev.set_start_position(35, 48, 21)
+        # by different PCBA will be different size
+        #self.LT_300H_dev.set_max_limit_position(150, 130, 21)
         self.LT_300H_dev.set_max_limit_position(150, 110, 21)
 
         # x 方向：1 表示向右 (0->200)，-1 表示向左 (200->0)
         self._x_dir = 1
+        #self.step_x = 26
+        #self.step_y = 15
         self.step_x = 90
         self.step_y = 53
         self.position = self.calculate_all_position()
@@ -349,6 +355,7 @@ class CameraMoveWorker(QObject):
                     frame_copy = self.camera_app.current_frame.copy()
                     break
                 except Exception:
+                    print("copy_frame not get ")
                     frame_copy = None
 
             if frame_copy is None or frame_copy.max() == 0:
@@ -753,8 +760,8 @@ class CameraApp(QWidget):
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
             self.AOI_worker.detect_index = -1
-            self.AOI_worker.detect_max_index = 4
             self.AOI_worker.fount_back = self.fount_back 
+            self.last_frame_filepath = [None] * self.AOI_worker.detect_max_index
 
             self.reset_aoi_value()
             self.camera_move_worker.move_camera_get_frame_done_callback = self.camera_move_done_callback
