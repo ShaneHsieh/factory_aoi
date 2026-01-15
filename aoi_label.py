@@ -322,7 +322,6 @@ class AOILabel(QLabel):
             super().mouseReleaseEvent(event)
 
     def apply_mask_rect(self, value=0):
-        print("apply_mask_rect called")
         if self.rect_start is None or self.rect_end is None or self._pixmap is None:
             return
 

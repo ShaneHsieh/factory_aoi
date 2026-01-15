@@ -739,11 +739,11 @@ class CameraApp(QWidget):
             self.control_panel.activateWindow()
             
         elif event.key() == Qt.Key_A:
-            for i, mask in enumerate(self.AOI_worker.masks):
-                if mask is None:
-                    print("No mask found " , i)
-                else:
-                    print("Mask shape " , i , mask.shape , " max = " , mask.max() , " min = " , mask.min())
+            # for i, mask in enumerate(self.AOI_worker.masks):
+            #     if mask is None:
+            #         print("No mask found " , i)
+            #     else:
+            #         print("Mask shape " , i , mask.shape , " max = " , mask.max() , " min = " , mask.min())
 
             self.mask_display_mode()
 
@@ -874,8 +874,11 @@ class CameraApp(QWidget):
                 self.message_box.emit("沒有資料夾", f"{folder} 沒有mask 資料夾", 3000)
             #os.makedirs(folder, exist_ok=True)
             filename = os.path.join(folder, "mask.bmp")
-            print("Saving mask to " , filename)
+
             self.image_label.save_mask(filename)
+            
+            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
+            self.AOI_worker.masks[goldens_index] = self.image_label.mask
             self.image_label.set_draw_mode(False)
             self.image_label.set_mask(None)
             
