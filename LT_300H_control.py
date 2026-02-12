@@ -14,7 +14,7 @@ class LT300HControl(SerialDevice):
             QMessageBox.warning(None,"RS232 沒有接上","無法控制 LT-300H 請確認 RS232 連接是否正確")
             return
         self.start_reading()
-        self.set_move_speed(300)
+        self.set_move_speed(100)
         #self.get_current_position()#100.001,100.002,0.000
         time.sleep(0.5)  # 等待回應
         self.limit_x = np.array([0, 300])
