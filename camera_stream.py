@@ -60,7 +60,7 @@ class AOIMatchWorker(QObject):
         self.detect_result = []
         self.detect_index = -1
         self.detect_max_index = 4
-        self.fount_back = 0
+        self.front_back = 0
         
     def run(self):
         while self._running:
@@ -124,11 +124,44 @@ class AOIMatchWorker(QObject):
         if not camera_move_worker or not hasattr(camera_move_worker, 'position'):
             self.message_box.emit("設定檢測樣本", "CameraMoveWorker 不可用！", 3000)
             return
+        # 嘗試讀取根目錄下的 config.ini，將設定應用到 LT_300H 裝置
+        config_path = os.path.join(folder_path, 'config.ini')
+        if os.path.isfile(config_path) and hasattr(camera_move_worker, 'LT_300H_dev'):
+            try:
+                cfg = configparser.ConfigParser()
+                cfg.read(config_path)
+                # Camera: set start position
+                if cfg.has_section('Camera'):
+                    x_start = int(cfg.get('Camera', 'x_start', fallback=str(camera_move_worker.LT_300H_dev.start_x)))
+                    y_start = int(cfg.get('Camera', 'y_start', fallback=str(camera_move_worker.LT_300H_dev.start_y)))
+                    z_start = int(cfg.get('Camera', 'z_start', fallback=str(getattr(camera_move_worker.LT_300H_dev, 'start_z', camera_move_worker.LT_300H_dev.start_y))))
+                    try:
+                        camera_move_worker.LT_300H_dev.set_start_position(x_start, y_start, z_start)
+                    except Exception as e:
+                        self.message_box.emit("設定起始位置失敗", f"設定起始位置失敗: {e}", 3000)
+
+                # PCB: set max limit position
+                if cfg.has_section('PCB'):
+                    x_limit = int(cfg.get('PCB', 'x_limit', fallback=str(camera_move_worker.LT_300H_dev.limit_x[1] if hasattr(camera_move_worker.LT_300H_dev, 'limit_x') else camera_move_worker.LT_300H_dev.start_x)))
+                    y_limit = int(cfg.get('PCB', 'y_limit', fallback=str(camera_move_worker.LT_300H_dev.limit_y[1] if hasattr(camera_move_worker.LT_300H_dev, 'limit_y') else camera_move_worker.LT_300H_dev.start_y)))
+                    z_limit = int(cfg.get('PCB', 'z_limit', fallback=str(getattr(camera_move_worker.LT_300H_dev, 'start_z', camera_move_worker.LT_300H_dev.start_y))))
+                    try:
+                        camera_move_worker.LT_300H_dev.set_max_limit_position(x_limit, y_limit, z_limit)
+                    except Exception as e:
+                        self.message_box.emit("設定最大限制失敗", f"設定最大限制失敗: {e}", 3000)
+
+                # 重新計算掃描位置
+                try:
+                    camera_move_worker.position = camera_move_worker.calculate_all_position()
+                except Exception:
+                    pass
+            except Exception as e:
+                self.message_box.emit("讀取 camera config 失敗", f"讀取 {config_path} 時發生錯誤: {e}", 3000)
 
         # 依序讀取正面(0)和反面(1)
-        for fount in range(2):
+        for front in range(2):
             for i in range(len(camera_move_worker.position)):
-                goldens_in_subdir, aoi_rect , mask = self.load_sample_for_index(folder_path, camera_move_worker, fount, i)
+                goldens_in_subdir, aoi_rect , mask = self.load_sample_for_index(folder_path, camera_move_worker, front, i)
                 all_goldens.append(goldens_in_subdir)
                 all_aoi_rects.append(aoi_rect)
                 self.masks.append(mask)
@@ -137,10 +170,10 @@ class AOIMatchWorker(QObject):
         self.goldens = all_goldens
         self.aoi_rect = all_aoi_rects
 
-    def load_sample_for_index(self, folder_path, camera_move_worker, fount, index):
-        """為指定的 fount 和 index 載入樣本和 aoi_rect。"""
+    def load_sample_for_index(self, folder_path, camera_move_worker, front, index):
+        """為指定的 front 和 index 載入樣本和 aoi_rect。"""
         x, y, z = camera_move_worker.get_position(index)
-        sub_dir_name = f"{fount}_{x}_{y}_{z}"
+        sub_dir_name = f"{front}_{x}_{y}_{z}"
         sub_dir = os.path.join(folder_path, sub_dir_name)
         return self.sample_load(sub_dir)
     
@@ -185,7 +218,7 @@ class AOIMatchWorker(QObject):
             return None , 0
         frame = self.detect_frame[self.detect_index].copy()
 
-        goldens_index = self.detect_index if self.fount_back == 0 else self.detect_index + self.detect_max_index
+        goldens_index = self.detect_index if self.front_back == 0 else self.detect_index + self.detect_max_index
 
         if frame is None or self.goldens[goldens_index] is None:
             return None , 0
@@ -205,7 +238,7 @@ class AOIMatchWorker(QObject):
     def match_result(self, mask_min, a , aoi=None):
         m = self.aoi_model.post_proc(mask_min, self.threshold, self.n_erode, self.n_dilate)
 
-        goldens_index = self.detect_index if self.fount_back == 0 else self.detect_index + self.detect_max_index
+        goldens_index = self.detect_index if self.front_back == 0 else self.detect_index + self.detect_max_index
 
         if self.masks and len(self.masks) > goldens_index:
             if self.masks[goldens_index] is not None:
@@ -225,10 +258,12 @@ class CameraMoveWorker(QObject):
         self.LT_300H_dev = LT300HControl(port="COM7", baudrate=115200, timeout=1.0)
         # by different lens with camera will be different setting
         #self.LT_300H_dev.set_start_position(3, 32, 11)
-        self.LT_300H_dev.set_start_position(35, 48, 21)
+        #self.LT_300H_dev.set_start_position(35, 48, 21)
+        self.LT_300H_dev.set_start_position(0, 0, 21)
         # by different PCBA will be different size
         #self.LT_300H_dev.set_max_limit_position(150, 130, 21)
-        self.LT_300H_dev.set_max_limit_position(150, 110, 21)
+        #self.LT_300H_dev.set_max_limit_position(150, 110, 21)
+        self.LT_300H_dev.set_max_limit_position(300, 300, 21)
 
         # x 方向：1 表示向右 (0->200)，-1 表示向左 (200->0)
         self._x_dir = 1
@@ -435,7 +470,7 @@ class CameraApp(QWidget):
 
         self.aoi_model = cv_aoi()
         self.base_path = os.path.dirname(os.path.abspath(__file__))
-        self.fount_back = None
+        self.front_back = None
         self.current_folder = ""
 
         self.show_detect_result_frame_flag = True
@@ -526,7 +561,7 @@ class CameraApp(QWidget):
 
     def camera_move_done_callback(self ,frame , index):
         today = "AOI_" + time.strftime("%Y%m%d")
-        save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.fount_back , self.camera_move_worker.current_position_index)
+        save_dir = self.get_move_folder(os.path.join(os.path.dirname(os.path.abspath(__file__)), today) , self.front_back , self.camera_move_worker.current_position_index)
         self.last_frame_filepath[self.camera_move_worker.current_position_index] = self.snapshot_path(frame , save_dir)
         if index == -1:
             self.AOI_worker.detect_frame.append(frame.copy())
@@ -547,7 +582,7 @@ class CameraApp(QWidget):
                           if hasattr(self.control_panel, 'folder_save_path') 
                           else os.path.dirname(os.path.abspath(__file__)))
         
-        folder = self.get_move_folder(positive_folder , self.fount_back , self.camera_move_worker.current_position_index)
+        folder = self.get_move_folder(positive_folder , self.front_back , self.camera_move_worker.current_position_index)
         os.makedirs(folder, exist_ok=True)
         try:
             self.snapshot_path(frame_copy, folder, message=False)
@@ -559,9 +594,7 @@ class CameraApp(QWidget):
         """啟動正樣本拍照 (在背景 thread 中執行)
         """
         start_time = time.time()
-        positive_folder = (self.control_panel.folder_save_path 
-                          if hasattr(self.control_panel, 'folder_save_path') 
-                          else os.path.dirname(os.path.abspath(__file__)))
+        positive_folder = self.prepare_positive_folder()
         
         if positive_folder is None:
             self.message_box.emit("正樣資料夾錯誤", f'找不到資料夾{positive_folder}', 3000)
@@ -571,21 +604,21 @@ class CameraApp(QWidget):
         back_samples = get_file(self.get_move_folder(positive_folder , 1 , 0), extension='.bmp')
 
         if len(front_samples) == 0 and len(back_samples) == 0:
-            self.fount_back = 0 # not sample
+            self.front_back = 0 # not sample
         else:
-            fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, front_samples , back_samples)
+            front_back = self.aoi_model.get_front_back_sample(self.current_frame, front_samples , back_samples)
 
-            if fount_back < 0 :
-                #self.fount_back = 0
+            if front_back < 0 :
+                #self.front_back = 0
                 if len(front_samples) == 0 :
-                    self.fount_back = 0
+                    self.front_back = 0
                 elif len(back_samples) == 0:
-                    self.fount_back = 1
+                    self.front_back = 1
                 else:
                     self.message_box.emit("判斷失敗", f'無法判斷正反面', 3000)
                     return
             else:
-                self.fount_back = fount_back
+                self.front_back = front_back
         
         end_time = time.time()
         
@@ -642,6 +675,51 @@ class CameraApp(QWidget):
         except Exception as e:
             print(f"detect_and_save_aoi_rect error: {e}")
             self.aoi_rect = [21, 2160 - 21, 38, 3840 - 38]
+
+    def prepare_positive_folder(self):
+        """確定正樣本資料夾並（若有 config.ini）讀取 camera/PCB 設定，更新 LT_300H 裝置與位置列表。"""
+        positive_folder = (self.control_panel.folder_save_path
+                          if hasattr(self.control_panel, 'folder_save_path')
+                          else os.path.dirname(os.path.abspath(__file__)))
+
+        if positive_folder is None:
+            return None
+
+        # 若有 config.ini 則套用到裝置
+        config_path = os.path.join(positive_folder, 'config.ini')
+        if os.path.isfile(config_path) and hasattr(self, 'camera_move_worker') and hasattr(self.camera_move_worker, 'LT_300H_dev'):
+            try:
+                cfg = configparser.ConfigParser()
+                cfg.read(config_path)
+                # Camera: set start position
+                if cfg.has_section('Camera'):
+                    x_start = int(cfg.get('Camera', 'x_start', fallback=str(self.camera_move_worker.LT_300H_dev.start_x)))
+                    y_start = int(cfg.get('Camera', 'y_start', fallback=str(self.camera_move_worker.LT_300H_dev.start_y)))
+                    z_start = int(cfg.get('Camera', 'z_start', fallback=str(getattr(self.camera_move_worker.LT_300H_dev, 'start_z', self.camera_move_worker.LT_300H_dev.start_y))))
+                    try:
+                        self.camera_move_worker.LT_300H_dev.set_start_position(x_start, y_start, z_start)
+                    except Exception as e:
+                        self.message_box.emit("設定起始位置失敗", f"設定起始位置失敗: {e}", 3000)
+
+                # PCB: set max limit position
+                if cfg.has_section('PCB'):
+                    x_limit = int(cfg.get('PCB', 'x_limit', fallback=str(self.camera_move_worker.LT_300H_dev.limit_x[1] if hasattr(self.camera_move_worker.LT_300H_dev, 'limit_x') else self.camera_move_worker.LT_300H_dev.start_x)))
+                    y_limit = int(cfg.get('PCB', 'y_limit', fallback=str(self.camera_move_worker.LT_300H_dev.limit_y[1] if hasattr(self.camera_move_worker.LT_300H_dev, 'limit_y') else self.camera_move_worker.LT_300H_dev.start_y)))
+                    z_limit = int(cfg.get('PCB', 'z_limit', fallback=str(getattr(self.camera_move_worker.LT_300H_dev, 'start_z', self.camera_move_worker.LT_300H_dev.start_y))))
+                    try:
+                        self.camera_move_worker.LT_300H_dev.set_max_limit_position(x_limit, y_limit, z_limit)
+                    except Exception as e:
+                        self.message_box.emit("設定最大限制失敗", f"設定最大限制失敗: {e}", 3000)
+
+                # 重新計算掃描位置
+                try:
+                    self.camera_move_worker.position = self.camera_move_worker.calculate_all_position()
+                except Exception:
+                    pass
+            except Exception as e:
+                self.message_box.emit("讀取 camera config 失敗", f"讀取 {config_path} 時發生錯誤: {e}", 3000)
+
+        return positive_folder
 
     def snapshot_current_view(self):
         """保存目前顯示的畫面 (F3)，包含縮放裁切"""
@@ -706,15 +784,17 @@ class CameraApp(QWidget):
 
         event.accept()
 
-    def check_test_fount_back(self,folder_name: str) -> int:
+    def check_test_front_back(self,folder_name: str) -> int:
         start_time = time.time()
-        fount_sample = get_file(self.get_move_folder(folder_name , 0 , self.camera_move_worker.current_position_index) , extension='.bmp')
+        front_sample = get_file(self.get_move_folder(folder_name , 0 , self.camera_move_worker.current_position_index) , extension='.bmp')
         back_sample = get_file(self.get_move_folder(folder_name , 1 , self.camera_move_worker.current_position_index) , extension='.bmp')
-        fount_back = self.aoi_model.get_fount_back_sample(self.current_frame, fount_sample , back_sample)
+        front_sample = [p for p in front_sample if os.path.basename(p).lower() != 'mask.bmp']
+        back_sample = [p for p in back_sample if os.path.basename(p).lower() != 'mask.bmp']
+        front_back = self.aoi_model.get_front_back_sample(self.current_frame, front_sample , back_sample)
 
         end_time = time.time()
-        print(f"check_test_fount_back time = {end_time - start_time} s , {fount_back}")
-        return fount_back
+        print(f"check_test_front_back time = {end_time - start_time} s , {front_back}")
+        return front_back
 
     def reset_aoi_value(self):
         self.show_detect_result_frame_flag = True
@@ -748,9 +828,9 @@ class CameraApp(QWidget):
             self.mask_display_mode()
 
         elif event.key() == Qt.Key_Enter:
-            self.fount_back = self.check_test_fount_back(self.current_folder)
+            self.front_back = self.check_test_front_back(self.current_folder)
 
-            if self.fount_back < 0 :
+            if self.front_back < 0 :
                 self.message_box.emit("沒有樣本", f"{self.current_folder} 沒有樣本", 3000)
                 return
             
@@ -760,7 +840,7 @@ class CameraApp(QWidget):
             self.AOI_worker.detect_frame = []
             self.AOI_worker.detect_result = []
             self.AOI_worker.detect_index = -1
-            self.AOI_worker.fount_back = self.fount_back 
+            self.AOI_worker.front_back = self.front_back 
             self.last_frame_filepath = [None] * self.AOI_worker.detect_max_index
 
             self.reset_aoi_value()
@@ -770,9 +850,9 @@ class CameraApp(QWidget):
         elif event.key() == Qt.Key_D: 
             if len(self.AOI_worker.detect_result) != self.AOI_worker.detect_max_index:
                 return
-            self.fount_back = self.check_test_fount_back(self.current_folder)
+            self.front_back = self.check_test_front_back(self.current_folder)
 
-            if self.fount_back < 0 :
+            if self.front_back < 0 :
                 self.message_box.emit("沒有樣本", f"{self.current_folder} 沒有樣本", 3000)
                 return
             
@@ -785,7 +865,7 @@ class CameraApp(QWidget):
             self.camera_move_worker.current_position_index = self.show_detect_result_index
 
             self.AOI_worker.detect_index = self.show_detect_result_index
-            self.AOI_worker.fount_back = self.fount_back 
+            self.AOI_worker.front_back = self.front_back 
 
             self.reset_aoi_value()
 
@@ -794,7 +874,7 @@ class CameraApp(QWidget):
 
         elif event.key() == Qt.Key_F1: # F1 新增正樣本
             folder_path = self.control_panel.folder_combo.currentText()
-            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.front_back , self.show_detect_result_index)
             os.makedirs(folder, exist_ok=True)
             if self.last_frame_filepath[self.show_detect_result_index] is None:
                 return
@@ -805,11 +885,11 @@ class CameraApp(QWidget):
             message_text = f"已新增正樣本圖片到 {new_path}"
             self.message_box.emit("新增正樣本", message_text, 3000)
 
-            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.AOI_worker.detect_max_index + self.show_detect_result_index
+            goldens_index = self.show_detect_result_index if self.front_back == 0 else self.AOI_worker.detect_max_index + self.show_detect_result_index
             self.AOI_worker.goldens[goldens_index], _ , _ = self.AOI_worker.sample_load(folder)
         elif event.key() == Qt.Key_F2: # F2 負樣本
             folder_path = "nagetive_samples"
-            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.front_back , self.show_detect_result_index)
             os.makedirs(folder, exist_ok=True)
             if self.last_frame_filepath[self.show_detect_result_index] is None:
                 return
@@ -869,7 +949,7 @@ class CameraApp(QWidget):
     def mask_display_mode(self):
         if self.image_label.draw_mode:
             folder_path = self.control_panel.folder_combo.currentText()
-            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.fount_back , self.show_detect_result_index)
+            folder = self.get_move_folder(os.path.join(self.base_path, folder_path) , self.front_back , self.show_detect_result_index)
             if not os.path.isdir(folder):
                 self.message_box.emit("沒有資料夾", f"{folder} 沒有mask 資料夾", 3000)
             #os.makedirs(folder, exist_ok=True)
@@ -877,7 +957,7 @@ class CameraApp(QWidget):
 
             self.image_label.save_mask(filename)
             
-            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
+            goldens_index = self.show_detect_result_index if self.front_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
             self.AOI_worker.masks[goldens_index] = self.image_label.mask
             self.image_label.set_draw_mode(False)
             self.image_label.set_mask(None)
@@ -885,7 +965,7 @@ class CameraApp(QWidget):
             self.show_detect_result_frame_flag = True
             self.match_done_to_show_image(self.show_detect_result_index)
         else:
-            goldens_index = self.show_detect_result_index if self.fount_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
+            goldens_index = self.show_detect_result_index if self.front_back == 0 else self.show_detect_result_index + self.AOI_worker.detect_max_index
             self.image_label.set_mask(self.AOI_worker.masks[goldens_index])
             self.image_label.set_draw_mode(True) 
             #time.sleep(0.1)
@@ -943,9 +1023,9 @@ class CameraApp(QWidget):
         if close_time > 0:
             QTimer.singleShot(close_time, close_msg)
 
-    def get_move_folder(self , folder_name: str , fount: int , index : int) -> str:
+    def get_move_folder(self , folder_name: str , front: int , index : int) -> str:
         x, y ,z= self.camera_move_worker.get_position(index)
-        return os.path.join(folder_name, str(fount) + "_" + str(x) + "_" + str(y) + "_" + str(z) + "\\")
+        return os.path.join(folder_name, str(front) + "_" + str(x) + "_" + str(y) + "_" + str(z) + "\\")
 
     def camera_setting(self):
         graph = FilterGraph()

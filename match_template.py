@@ -21,7 +21,7 @@ class cv_aoi:
         kp, des = orb.detectAndCompute(img, None)
         return kp, des
     
-    def get_fount_back_sample(self, camera_img , fount_files , back_files):
+    def get_front_back_sample(self, camera_img , front_files , back_files):
         orb_sample = cv2.ORB_create(nfeatures=1000)
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
@@ -62,12 +62,15 @@ class cv_aoi:
             avg_front = np.mean(front_scores)
             avg_back = np.mean(back_scores)
 
+            print(f"front_scores: {front_scores}")
+            print(f"back_scores: {back_scores}")
+
             # 檢查是否為有效值（非 NaN）
             #front_valid = not np.isnan(avg_front) and avg_front > 2
             #back_valid = not np.isnan(avg_back) and avg_back > 2
 
-            #print(f"avg_front {avg_front} , avg_back {avg_back} avg_front > avg_back {(not np.isnan(avg_front) and not np.isnan(avg_back)) and (avg_front > avg_back)}")
-            #print(f"front {np.max(front_scores)} back {np.max(back_scores)} ")
+            print(f"avg_front {avg_front} , avg_back {avg_back} avg_front > avg_back {(not np.isnan(avg_front) and not np.isnan(avg_back)) and (avg_front > avg_back)}")
+            print(f"front {np.max(front_scores)} back {np.max(back_scores)} ")
 
 
             if np.isnan(avg_back) and np.isnan(avg_front):
@@ -80,9 +83,9 @@ class cv_aoi:
                 return 0
             else:
                 return 1
-            
+             
 
-        front_samples = [cv2.imread(f) for f in fount_files]
+        front_samples = [cv2.imread(f) for f in front_files]
         back_samples = [cv2.imread(f) for f in back_files]
 
         result = classify_pcb_face(camera_img, front_samples, back_samples)

@@ -1,7 +1,7 @@
 __pycache__
 .ipynb_checkpoints
 *.bmp
-*.ini
+config.ini
 templates
 *copy*
 Shane
